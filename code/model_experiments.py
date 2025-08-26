@@ -14,13 +14,14 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from pathlib import Path
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 
 
 class ModelExperimentsV1:
-    def __init__(self, X, y, train_size=0.8):
+    def __init__(self, X, y, satellite, train_size=0.8):
         split_idx = int(len(X) * train_size)
         
         self.X_train = X.iloc[:split_idx]
@@ -33,23 +34,20 @@ class ModelExperimentsV1:
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)
         self.X_test_scaled = self.scaler.transform(self.X_test)
 
+        self.satellite = satellite
+
 
     def fit_grid_search(self, model, param_grid, scaled=False, model_name="Model"):
-        """
-        Runs GridSearchCV for a given model + param_grid with proper pipeline handling
-        """
-        print(f"\n=== Running {model_name} ===")
+        print(f"=== Running {model_name} for {self.satellite} ===")
         
         y_train = self.y_train
         y_test = self.y_test
 
         if scaled:
-            # Create pipeline with scaling
             pipeline = Pipeline([
                 ('scaler', MinMaxScaler()),
                 ('model', model)
             ])
-            # Adjust param_grid keys for pipeline
             adjusted_param_grid = {f'model__{k}': v for k, v in param_grid.items()}
             
             grid_search = GridSearchCV(
@@ -59,7 +57,6 @@ class ModelExperimentsV1:
                 n_jobs=-1,
                 verbose=1
             )
-            # Use unscaled data - pipeline will handle scaling internally
             X_train_data = self.X_train
             X_test_data = self.X_test
             
@@ -75,29 +72,47 @@ class ModelExperimentsV1:
             X_test_data = self.X_test
 
         grid_search.fit(X_train_data, y_train)
-
-        print("Best Parameters:", grid_search.best_params_)
+        # print("Best Parameters:", grid_search.best_params_)
 
         best_model = grid_search.best_estimator_
         test_score = best_model.score(X_test_data, y_test)
-        print("Test R2 Score:", test_score)
+        # print("Test R2 Score:", test_score)
         
         y_preds = best_model.predict(X_test_data)
 
-        # === Scatter Plot of Actual vs Predicted ===
+        mae = mean_absolute_error(y_test, y_preds)
+        mape = mean_absolute_percentage_error(y_test, y_preds) * 100
+
+        
+        # Create output directory if it doesn't exist
+        plot_dir = Path(f"/home/kshipra/work/major/ml experiments/output/plots/{self.satellite}")
+        os.makedirs(plot_dir, exist_ok=True)
+
+        
+        # Generate scatter plot with metrics
         plt.figure(figsize=(14, 7))
-
-        PredictionErrorDisplay.from_predictions(y_test, y_preds)
-
+        indices = range(len(y_test))
+        
+        plt.scatter(indices, y_test, label='Actual', alpha=0.7, color='blue')
+        plt.scatter(indices, y_preds, label='Predicted', alpha=0.7, color='red')
+        
+        plt.xlabel('Sample Index')
+        plt.ylabel('Values')
+        plt.title(f'{self.satellite}: Actual vs Predicted Values - {model_name}')
+        plt.legend()
         plt.grid(True, alpha=0.3)
-
+        
+        # Add text box with metrics
+        metrics_text = f'MAE: {mae:.4f}\nMAPE: {mape:.2f}%'
+        plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+                    verticalalignment='top', fontsize=12)
+        
         # Save plot
-        output_dir = "/home/kshipra/work/major/ml experiments/output/plots"
-        os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(os.path.join(output_dir, f"{model_name}_actual_vs_predicted.png"), dpi=300)
+        plot_path = os.path.join(plot_dir, f"{model_name}_actual_vs_predicted.png")
+        plt.savefig(plot_path, bbox_inches='tight', dpi=300)
         plt.close()
-
-
+        
         return self.make_result_dict(y_test, y_preds)
     
     def make_result_dict(self, y_true, y_preds):
