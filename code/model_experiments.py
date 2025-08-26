@@ -3,12 +3,17 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, mean_s
 from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.svm import SVR
+from sklearn.linear_model import LassoLars, Lasso, ElasticNet
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import PredictionErrorDisplay
 from xgboost import XGBRegressor
+
 import warnings
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import os
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
@@ -78,6 +83,21 @@ class ModelExperimentsV1:
         print("Test R2 Score:", test_score)
         
         y_preds = best_model.predict(X_test_data)
+
+        # === Scatter Plot of Actual vs Predicted ===
+        plt.figure(figsize=(14, 7))
+
+        PredictionErrorDisplay.from_predictions(y_test, y_preds)
+
+        plt.grid(True, alpha=0.3)
+
+        # Save plot
+        output_dir = "/home/kshipra/work/major/ml experiments/output/plots"
+        os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(os.path.join(output_dir, f"{model_name}_actual_vs_predicted.png"), dpi=300)
+        plt.close()
+
+
         return self.make_result_dict(y_test, y_preds)
     
     def make_result_dict(self, y_true, y_preds):
@@ -142,6 +162,9 @@ class ModelExperimentsV1:
         }
         if self.X_train_scaled is not None:  # only run if scaled data provided
             results["SVR"] = self.fit_grid_search(svr, svr_param_grid, scaled=True, model_name="SVR")
+        
+        lasso = Lasso()
+
 
         return results
 
