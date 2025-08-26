@@ -3,7 +3,8 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, mean_s
 from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.svm import SVR
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.pipeline import Pipeline
 from xgboost import XGBRegressor
 import warnings
 import pandas as pd
@@ -11,7 +12,142 @@ import numpy as np
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-class ModelExperiments:
+
+
+class ModelExperimentsV1:
+    def __init__(self, X, y, train_size=0.8):
+        split_idx = int(len(X) * train_size)
+        
+        self.X_train = X.iloc[:split_idx]
+        self.X_test = X.iloc[split_idx:]
+        self.y_train = y.iloc[:split_idx].values.flatten()
+        self.y_test = y.iloc[split_idx:].values.flatten()
+        
+        # Store scaler for potential use, but consider moving scaling into pipeline
+        self.scaler = MinMaxScaler()
+        self.X_train_scaled = self.scaler.fit_transform(self.X_train)
+        self.X_test_scaled = self.scaler.transform(self.X_test)
+
+
+    def fit_grid_search(self, model, param_grid, scaled=False, model_name="Model"):
+        """
+        Runs GridSearchCV for a given model + param_grid with proper pipeline handling
+        """
+        print(f"\n=== Running {model_name} ===")
+        
+        y_train = self.y_train
+        y_test = self.y_test
+
+        if scaled:
+            # Create pipeline with scaling
+            pipeline = Pipeline([
+                ('scaler', MinMaxScaler()),
+                ('model', model)
+            ])
+            # Adjust param_grid keys for pipeline
+            adjusted_param_grid = {f'model__{k}': v for k, v in param_grid.items()}
+            
+            grid_search = GridSearchCV(
+                estimator=pipeline,
+                param_grid=adjusted_param_grid,
+                cv=3,
+                n_jobs=-1,
+                verbose=1
+            )
+            # Use unscaled data - pipeline will handle scaling internally
+            X_train_data = self.X_train
+            X_test_data = self.X_test
+            
+        else:
+            grid_search = GridSearchCV(
+                estimator=model,
+                param_grid=param_grid,
+                cv=3,
+                n_jobs=-1,
+                verbose=1
+            )
+            X_train_data = self.X_train
+            X_test_data = self.X_test
+
+        grid_search.fit(X_train_data, y_train)
+
+        print("Best Parameters:", grid_search.best_params_)
+
+        best_model = grid_search.best_estimator_
+        test_score = best_model.score(X_test_data, y_test)
+        print("Test R2 Score:", test_score)
+        
+        y_preds = best_model.predict(X_test_data)
+        return self.make_result_dict(y_test, y_preds)
+    
+    def make_result_dict(self, y_true, y_preds):
+        result_dict = {}
+
+        result_dict['MAE'] = round(mean_absolute_error(y_true, y_preds), 4)
+        result_dict['MSE'] = round(mean_squared_error(y_true, y_preds), 4)
+        result_dict['RMSE'] = round(root_mean_squared_error(y_true, y_preds), 4)
+        result_dict['R2'] =  round(r2_score(y_true, y_preds), 4)
+        result_dict['MAPE'] = round(mean_absolute_percentage_error(y_true, y_preds), 4)
+
+        return result_dict
+
+    def run_all(self):
+        """
+        Runs all experiments: RF, XGB, AdaBoost, SVR
+        """
+        results = {}
+
+        # Random Forest
+        rf = RandomForestRegressor(random_state=10)
+        rf_param_grid = {
+            'n_estimators': [100, 200, 500],     
+            'max_depth': [None, 5, 10, 20],      
+            'min_samples_split': [2, 5, 10],     
+            'min_samples_leaf': [1, 2, 4],       
+            'max_features': ['sqrt', 'log2']     
+        }
+        results["RandomForest"] = self.fit_grid_search(rf, rf_param_grid, model_name="RandomForest")
+
+        # XGBoost
+        xgb = XGBRegressor(random_state=10, objective='reg:squarederror')
+        xgb_param_grid = {
+            'n_estimators': [100, 200, 500],
+            'max_depth': [3, 5, 7],
+            'learning_rate': [0.01, 0.05, 0.1],
+            'subsample': [0.8, 1.0],
+            'colsample_bytree': [0.8, 1.0]
+        }
+        results["XGBoost"] = self.fit_grid_search(xgb, xgb_param_grid, model_name="XGBoost")
+
+        # AdaBoost
+        ada = AdaBoostRegressor(
+            estimator=DecisionTreeRegressor(random_state=10),
+            random_state=10
+        )
+        ada_param_grid = {
+            'n_estimators': [50, 100, 200],
+            'learning_rate': [0.01, 0.05, 0.1, 1.0],
+            'estimator__max_depth': [2, 3, 5, None],
+            'estimator__min_samples_split': [2, 5, 10]
+        }
+        results["AdaBoost"] = self.fit_grid_search(ada, ada_param_grid, model_name="AdaBoost")
+
+        # SVR (requires scaled data!)
+        svr = SVR()
+        svr_param_grid = {
+            'kernel': ['linear', 'rbf', 'poly', 'sigmoid'],
+            'C': [0.1, 1, 10, 100],
+            'gamma': ['scale', 'auto', 0.01, 0.1, 1],
+            'epsilon': [0.01, 0.1, 0.2, 0.5]
+        }
+        if self.X_train_scaled is not None:  # only run if scaled data provided
+            results["SVR"] = self.fit_grid_search(svr, svr_param_grid, scaled=True, model_name="SVR")
+
+        return results
+
+
+
+class ModelExperimentsV2:
     def __init__(self, X, y, test_size=0.2, val_size=0.2, random_state=10):
         self.random_state = random_state
         
