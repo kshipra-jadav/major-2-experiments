@@ -184,149 +184,174 @@ class ModelExperimentsV1:
         return results
 
 
-
-class ModelExperimentsV2:
-    def __init__(self, X, y, test_size=0.2, val_size=0.2, random_state=10):
+class ANNExperimentsV1:
+    def __init__(self, data, features=['HH', 'HV'], target='SM', test_size=0.1, val_size=0.25, random_state=42, satellite=None):
+        self.data = data
+        self.features = features
+        self.target = target
+        self.test_size = test_size
+        self.val_size = val_size
         self.random_state = random_state
+        self.satellite = satellite
         
-        # First split: train+val vs test
-        X_train_val, X_test, y_train_val, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=random_state
+        # Initialize attributes
+        self.X_train = None
+        self.X_val = None
+        self.X_test = None
+        self.y_train = None
+        self.y_val = None
+        self.y_test = None
+        self.scaler = None
+        self.X_train_scaled = None
+        self.X_val_scaled = None
+        self.X_test_scaled = None
+        self.model = None
+        self.history = None
+        
+        # Prepare data
+        self._prepare_data()
+    
+    def _prepare_data(self):
+        """Prepare and split the data into train, validation, and test sets."""
+        X = self.data[self.features]
+        y = self.data[self.target]
+        
+        # Split the data into train, validation, and test sets
+        X_temp, self.X_test, y_temp, self.y_test = train_test_split(
+            X, y, test_size=self.test_size, random_state=self.random_state
+        )
+        self.X_train, self.X_val, self.y_train, self.y_val = train_test_split(
+            X_temp, y_temp, test_size=self.val_size, random_state=self.random_state
         )
         
-        # Second split: train vs val
-        val_size_adjusted = val_size / (1 - test_size)  # Adjust val_size for the remaining data
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_train_val, y_train_val, test_size=val_size_adjusted, random_state=random_state
+        print(f"Training set: {self.X_train.shape[0]} samples")
+        print(f"Validation set: {self.X_val.shape[0]} samples")
+        print(f"Test set: {self.X_test.shape[0]} samples")
+        
+        # Scale the features
+        self.scaler = MinMaxScaler()
+        self.X_train_scaled = self.scaler.fit_transform(self.X_train)
+        self.X_val_scaled = self.scaler.transform(self.X_val)
+        self.X_test_scaled = self.scaler.transform(self.X_test)
+    
+    def train_model(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0):
+        self.model = model
+        
+        # Compile the model
+        self.model.compile(
+            optimizer=optimizer,
+            loss='mse',
+            metrics=['mae']
         )
         
-        # Store the splits
-        self.X_train = X_train
-        self.X_val = X_val
-        self.X_test = X_test
-        self.y_train = y_train.values.flatten()
-        self.y_val = y_val.values.flatten()
-        self.y_test = y_test.values.flatten()
-        
-        # Scale the data
-        self.scaler_X = StandardScaler()
-        
-        self.X_train_scaled = self.scaler_X.fit_transform(X_train)
-        self.X_val_scaled = self.scaler_X.transform(X_val)
-        self.X_test_scaled = self.scaler_X.transform(X_test)
-        
-        
-        print(f"Data split sizes:")
-        print(f"Train: {len(X_train)} samples")
-        print(f"Validation: {len(X_val)} samples")
-        print(f"Test: {len(X_test)} samples")
-
-    def fit_grid_search(self, model, param_grid, scaled=False, model_name="Model"):
-        print(f"\n=== Running {model_name} ===")
-        
-        X_train = self.X_train_scaled if scaled else self.X_train
-        X_val = self.X_val_scaled if scaled else self.X_val
-        y_train = self.y_train
-        y_val = self.y_val
-
-        grid_search = GridSearchCV(
-            estimator=model,
-            param_grid=param_grid,
-            cv=3,
-            n_jobs=-1,
-            verbose=1,
-            scoring='neg_root_mean_squared_error'  # Better scoring for regression
+        # Train the model
+        self.history = self.model.fit(
+            self.X_train_scaled, self.y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(self.X_val_scaled, self.y_val),
+            verbose=verbose
         )
-
-        grid_search.fit(X_train, y_train)
-
-        print("Best Parameters:", grid_search.best_params_)
-
-        # Evaluate on validation set
-        best_model = grid_search.best_estimator_
-        val_preds = best_model.predict(X_val)
-        val_results = self.make_result_dict(y_val, val_preds, "Validation")
         
-        # Also evaluate on test set for final comparison
-        X_test = self.X_test_scaled if scaled else self.X_test
-        y_test = self.y_test
-        test_preds = best_model.predict(X_test)
-        test_results = self.make_result_dict(y_test, test_preds, "Test")
+        # Evaluate on test set
+        test_loss, test_mae = self.model.evaluate(self.X_test_scaled, self.y_test, verbose=0)
+        print(f"\nTest Loss (MSE): {test_loss:.4f}")
+        print(f"Test MAE: {test_mae:.4f}")
         
-        # Store the best model
-        self.best_models = getattr(self, 'best_models', {})
-        self.best_models[model_name] = best_model
+        # Make predictions
+        y_pred = self.model.predict(self.X_test_scaled).flatten()
         
-        return {**val_results, **test_results}
-
-    def make_result_dict(self, y_true, y_preds, set_name):
-        """
-        Create evaluation metrics dictionary with set name prefix
-        """
-        result_dict = {}
-        prefix = f"{set_name}_"
+        # Calculate additional metrics
+        mse = mean_squared_error(self.y_test, y_pred)
+        r2 = r2_score(self.y_test, y_pred)
         
-        result_dict[prefix + 'MAE'] = round(mean_absolute_error(y_true, y_preds), 4)
-        result_dict[prefix + 'MSE'] = round(mean_squared_error(y_true, y_preds), 4)
-        result_dict[prefix + 'RMSE'] = round(root_mean_squared_error(y_true, y_preds), 4)
-        result_dict[prefix + 'R2'] = round(r2_score(y_true, y_preds), 4)
-        result_dict[prefix + 'MAPE'] = round(mean_absolute_percentage_error(y_true, y_preds), 4)
+        print(f"\nAdditional Metrics:")
+        print(f"MSE: {mse:.4f}")
+        print(f"R² Score: {r2:.4f}")
+        print(f"RMSE: {np.sqrt(mse):.4f}")
         
-        return result_dict
+        return y_pred, test_loss, test_mae, mse, r2
+    
+    def plot_training_history(self):
+        """Plot training and validation loss and MAE."""
+        if self.history is None:
+            print("No training history available. Train the model first.")
+            return
+        
+        plt.figure(figsize=(12, 4))
+        
+        plt.subplot(1, 2, 1)
+        plt.plot(self.history.history['loss'], label='Training Loss')
+        plt.plot(self.history.history['val_loss'], label='Validation Loss')
+        plt.title('Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        plt.subplot(1, 2, 2)
+        plt.plot(self.history.history['mae'], label='Training MAE')
+        plt.plot(self.history.history['val_mae'], label='Validation MAE')
+        plt.title('Model MAE')
+        plt.xlabel('Epoch')
+        plt.ylabel('MAE')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def plot_predictions_vs_actual(self, y_pred):
+        """Plot predictions vs actual values."""
+        
+        plt.figure(figsize=(8, 6))
 
-    def run_all(self):
-        """
-        Runs all experiments: RF, XGB, AdaBoost, SVR
-        """
-        results = {}
+        plt.scatter(self.y_test, y_pred, alpha=0.6)
+        plt.plot([self.y_test.min(), self.y_test.max()], 
+                 [self.y_test.min(), self.y_test.max()], 'r--', lw=2)
+        
+        plt.xlabel('Actual Values')
+        plt.ylabel('Predicted Values')
 
-        # Random Forest
-        rf = RandomForestRegressor(random_state=self.random_state)
-        rf_param_grid = {
-            'n_estimators': [100, 200, 500],     
-            'max_depth': [None, 5, 10, 20],      
-            'min_samples_split': [2, 5, 10],     
-            'min_samples_leaf': [1, 2, 4],       
-            'max_features': ['sqrt', 'log2']     
-        }
-        results["RandomForest"] = self.fit_grid_search(rf, rf_param_grid, model_name="RandomForest")
+        plt.title('Actual vs Predicted Values')
 
-        # XGBoost
-        xgb = XGBRegressor(random_state=self.random_state, objective='reg:squarederror')
-        xgb_param_grid = {
-            'n_estimators': [100, 200, 500],
-            'max_depth': [3, 5, 7],
-            'learning_rate': [0.01, 0.05, 0.1],
-            'subsample': [0.8, 1.0],
-            'colsample_bytree': [0.8, 1.0]
-        }
-        results["XGBoost"] = self.fit_grid_search(xgb, xgb_param_grid, model_name="XGBoost")
+        
+        
+        plt.show()
+    
+    def plot_line_comparison(self, y_pred, model_params):
+        """Plot line comparison of actual vs predicted values."""
+        plt.figure(figsize=(14, 7))
 
-        # AdaBoost
-        ada = AdaBoostRegressor(
-            estimator=DecisionTreeRegressor(random_state=self.random_state),
-            random_state=self.random_state
+        mae = mean_absolute_error(self.y_test, y_pred)
+        mape = mean_absolute_percentage_error(self.y_test, y_pred) * 100
+        
+        # Create index for x-axis
+        indices = range(len(self.y_test))
+        
+        # Plot both lines
+        plt.scatter(indices, self.y_test.values, label='actual', color='blue', alpha=0.7)
+        plt.scatter(indices, y_pred, label='predicted', color='red', alpha=0.7)
+        
+        plt.xlabel('Sample Index')
+        plt.ylabel('Values')
+        plt.title(f'{self.satellite}: Actual vs Predicted Values.\n Params: {model_params}')
+
+        metrics_text = f'MAE: {mae:.4f}\nMAPE: {mape:.2f}%'
+        plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
+                     bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8), 
+                     verticalalignment='top', fontsize=12)
+
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f'/home/kshipra/work/major/ml experiments/output/plots/{self.satellite}/{model_params}.png')
+        plt.show()
+    
+    def run_experiment(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0, model_param_string=None):
+        # Train model
+        y_pred, test_loss, test_mae, mse, r2 = self.train_model(
+            model, optimizer, epochs, batch_size, verbose
         )
-        ada_param_grid = {
-            'n_estimators': [50, 100, 200],
-            'learning_rate': [0.01, 0.05, 0.1, 1.0],
-            'estimator__max_depth': [2, 3, 5, None],
-            'estimator__min_samples_split': [2, 5, 10]
-        }
-        results["AdaBoost"] = self.fit_grid_search(ada, ada_param_grid, model_name="AdaBoost")
-
-        # SVR (requires scaled data)
-        svr = SVR()
-        svr_param_grid = {
-            'kernel': ['linear', 'rbf', 'poly'],
-            'C': [0.1, 1, 10, 100],
-            'gamma': ['scale', 'auto', 0.01, 0.1],
-            'epsilon': [0.01, 0.1, 0.2]
-        }
-        results["SVR"] = self.fit_grid_search(svr, svr_param_grid, scaled=True, model_name="SVR")
-
-        return results
-
-    def get_best_model(self, model_name):
-        """Get the best trained model by name"""
-        return self.best_models.get(model_name)
+        
+        # Generate plots
+        self.plot_training_history()
+        # self.plot_predictions_vs_actual(y_pred)
+        self.plot_line_comparison(y_pred, model_param_string)
