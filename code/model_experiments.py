@@ -3,12 +3,12 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, mean_s
 from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.svm import SVR
-from sklearn.linear_model import LassoLars, Lasso, ElasticNet
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.linear_model import Lasso
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import PredictionErrorDisplay
 from xgboost import XGBRegressor
 
+from tensorflow.keras.callbacks import EarlyStopping
 import tensorflow as tf
 
 import warnings
@@ -19,6 +19,26 @@ import os
 from pathlib import Path
 
 warnings.filterwarnings('ignore', category=FutureWarning)
+
+
+# put this somewhere near your class (once)
+from tqdm import tqdm
+
+class EpochTqdm(tf.keras.callbacks.Callback):
+    def __init__(self, total_epochs, desc="Epochs"):
+        super().__init__()
+        self.pbar = tqdm(total=total_epochs, desc=desc, unit="epoch")
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        # show loss/val_loss nicely (change keys as needed)
+        postfix = {}
+        if "loss" in logs: postfix["loss"] = f"{logs['loss']:.4f}"
+        if "val_loss" in logs: postfix["val_loss"] = f"{logs['val_loss']:.4f}"
+        if postfix:
+            self.pbar.set_postfix(postfix)
+        self.pbar.update(1)
+    def on_train_end(self, logs=None):
+        self.pbar.close()
 
 
 
@@ -87,7 +107,7 @@ class ModelExperimentsV1:
 
         
         # Create output directory if it doesn't exist
-        plot_dir = Path(f"/home/kshipra/work/major/ml experiments/output/plots/{self.satellite}")
+        plot_dir = Path(f"/home/kshipra/work/major/ml experiments/output/plots/ML/{self.satellite}")
         os.makedirs(plot_dir, exist_ok=True)
 
         
@@ -344,7 +364,7 @@ class ANNExperimentsV1:
 
         plt.legend()
         plt.grid(True, alpha=0.3)
-        plt.savefig(f'/home/kshipra/work/major/ml experiments/output/plots/{self.satellite}/{model_params}.png')
+        plt.savefig(f'/home/kshipra/work/major/ml experiments/output/plots/ANN/{self.satellite}/{model_params}.png')
         plt.show()
     
     def run_experiment(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0, model_param_string=None):
@@ -361,7 +381,13 @@ class ANNExperimentsV1:
 
 class PredictionIntervalEstimation(ANNExperimentsV1):
     def __init__(self, data, features=['HH', 'HV'], target='SM', test_size=0.1, val_size=0.25, random_state=42, satellite=None):
-        super().__init__(data, features=['HH', 'HV'], target='SM', test_size=0.1, val_size=0.25, random_state=42, satellite=None)
+        super().__init__(data, features=features, target=target, test_size=test_size, 
+                         val_size=val_size, random_state=random_state, satellite=satellite)
+        print(f"X_train shape: {self.X_train.shape}")
+        print(f"X_test shape:  {self.X_test.shape}")
+        print(f"y_train shape: {self.y_train.shape}")
+        print(f"y_test shape:  {self.y_test.shape}")
+
 
     def pinball_loss(self, y_true, y_pred, tau):
         error = y_true - y_pred
@@ -377,9 +403,15 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
         self.upper_model = tf.keras.models.clone_model(model)
         self.lower_model = tf.keras.models.clone_model(model)
 
+        if not isinstance(optimizer, str):
+            config = optimizer.get_config()
+            lower_model_optimizer = optimizer.__class__.from_config(config)
+        else:
+            lower_model_optimizer = optimizer
+
         # compile both models
         self.lower_model.compile(
-            optimizer=optimizer,
+            optimizer=lower_model_optimizer,
             loss=self.lower_quantile_loss
         )
         self.upper_model.compile(
@@ -387,32 +419,38 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
             loss=self.upper_quantile_loss
         )
 
+
         print("\n--------- TRAINING UPPER MODEL -----------\n")
+        early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+        progress = EpochTqdm(total_epochs=epochs)
         self.upper_model_history = self.upper_model.fit(
             self.X_train_scaled, self.y_train,
             epochs=epochs,
             batch_size=batch_size,
             validation_data=(self.X_val_scaled, self.y_val),
-            verbose=verbose
+            verbose=verbose,
+            callbacks=[progress, early_stopping]
         )
-
         print("\n--------- TRAINING LOWER MODEL -----------\n")
+        progress = EpochTqdm(total_epochs=epochs)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
         self.lower_model_history = self.lower_model.fit(
             self.X_train_scaled, self.y_train,
             epochs=epochs,
             batch_size=batch_size,
             validation_data=(self.X_val_scaled, self.y_val),
-            verbose=verbose
+            verbose=verbose,
+            callbacks=[progress, early_stopping]
         )
 
         y_preds_lower = self.lower_model.predict(self.X_test_scaled)
         y_preds_upper = self.upper_model.predict(self.X_test_scaled)
 
-        return y_preds_lower, y_preds_upper
+        return y_preds_lower.flatten(), y_preds_upper.flatten ()
 
-    def plot_training_history(self):
+    def plot_training_history(self, model_param_string):
         plt.figure(figsize=(12, 4))
-        plt.suptitle("Upper and Lower Model Training Loss")
+        plt.suptitle(f"{self.satellite}: {model_param_string}\nUpper and Lower Model Training Loss")
         plt.subplot(1, 2, 1)
         plt.plot(self.upper_model_history.history['loss'], label='Training Loss')
         plt.plot(self.upper_model_history.history['val_loss'], label='Validation Loss')
@@ -424,7 +462,7 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
         plt.subplot(1, 2, 2)
         plt.plot(self.lower_model_history.history['loss'], label='Training Loss')
         plt.plot(self.lower_model_history.history['val_loss'], label='Validation Loss')
-        plt.title('Upper Model Loss')
+        plt.title('Lower Model Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
@@ -449,13 +487,36 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
             'MPIW': mpiw(y_preds_lower, y_preds_upper)
         }
 
-    def run_experiment(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0, model_param_string=None):
-        y_preds_lower, y_preds_upper = self.train_model()
-        self.plot_training_history()
-        eval_dict = self.evaluate_model(y_preds_lower, y_preds_upper)
+    def plot_prediction_interval(self, y_pred_lower, y_pred_upper, model_param_string):
+        indices = range(len(self.y_test))
 
-        print('\nModel Results - \n')
-        print(f"PICP: {eval_dict['PICP'] * 100:.2f}%") 
-        print(f"MPIW: {eval_dict['MPIW']:.4f}")
+        eval_dict = self.evaluate_model(y_pred_lower, y_pred_upper)
 
+        plt.figure(figsize=(14, 7))
+        plt.plot(indices, self.y_test, 'o', color='blue', label='Actual Soil Moisture')
+        plt.plot(indices, y_pred_lower, color='red', linestyle='--', label='Lower Bound')
+        plt.plot(indices, y_pred_upper, color='orange', linestyle='--', label='Upper Bound')
+
+        # Fill the area between the bounds to show the interval
+        plt.fill_between(indices, y_pred_lower, y_pred_upper, color='gray', alpha=0.2, label='95% Prediction Interval')
+
+        metrics_text = f"PICP: {eval_dict['PICP']*100:.2f}\nMPIW: {eval_dict['MPIW']:.4f}"
+        plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8), 
+                verticalalignment='top', fontsize=12)
         
+        plot_dir = f"/home/kshipra/work/major/ml experiments/output/plots/{self.satellite}/PI"
+
+        plt.xlabel('Sample Index')
+        plt.ylabel('Soil Moisture')
+        plt.title(f'{self.satellite}: {model_param_string}\nPrediction Interval for Soil Moisture')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f"{plot_dir}/{model_param_string}.png", dpi=300)
+        plt.show()
+
+    def run_experiment(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0, model_param_string=None):
+        y_preds_lower, y_preds_upper = self.train_model(model, optimizer=optimizer, epochs=epochs, 
+                                                        batch_size=batch_size, verbose=verbose)
+        self.plot_training_history(model_param_string)
+        self.plot_prediction_interval(y_preds_lower, y_preds_upper, model_param_string)
