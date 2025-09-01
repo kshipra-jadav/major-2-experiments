@@ -399,23 +399,27 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
     def upper_quantile_loss(self, y_true, y_pred):
         return self.pinball_loss(y_true, y_pred, tau=0.975)
 
-    def train_model(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0):
+    def train_model(self, model, learning_rate, optimizer='adam', epochs=200, batch_size=32, verbose=0):
         self.upper_model = tf.keras.models.clone_model(model)
         self.lower_model = tf.keras.models.clone_model(model)
 
-        if not isinstance(optimizer, str):
-            config = optimizer.get_config()
-            lower_model_optimizer = optimizer.__class__.from_config(config)
+        if isinstance(optimizer, str):
+            optimizer_config = {'class_name': optimizer, 'config': {'learning_rate': learning_rate}} # Adam default
         else:
-            lower_model_optimizer = optimizer
+            optimizer_config = optimizer.get_config()
+            optimizer_config['class_name'] = optimizer_config['name']
+            del optimizer_config['name']
 
+        # 2. Create two new, independent optimizer instances from that config
+        upper_optimizer = tf.keras.optimizers.get(optimizer_config.copy())
+        lower_optimizer = tf.keras.optimizers.get(optimizer_config.copy())
         # compile both models
         self.lower_model.compile(
-            optimizer=lower_model_optimizer,
+            optimizer=lower_optimizer,
             loss=self.lower_quantile_loss
         )
         self.upper_model.compile(
-            optimizer=optimizer,
+            optimizer=upper_optimizer,
             loss=self.upper_quantile_loss
         )
 
@@ -515,8 +519,8 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
         plt.savefig(f"{plot_dir}/{model_param_string}.png", dpi=300)
         plt.show()
 
-    def run_experiment(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0, model_param_string=None):
+    def run_experiment(self, model, optimizer='adam', epochs=200, learning_rate=0.01, batch_size=32, verbose=0, model_param_string=None):
         y_preds_lower, y_preds_upper = self.train_model(model, optimizer=optimizer, epochs=epochs, 
-                                                        batch_size=batch_size, verbose=verbose)
+                                                        batch_size=batch_size, verbose=verbose, learning_rate=learning_rate)
         self.plot_training_history(model_param_string)
         self.plot_prediction_interval(y_preds_lower, y_preds_upper, model_param_string)
