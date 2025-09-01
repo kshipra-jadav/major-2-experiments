@@ -9,6 +9,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import PredictionErrorDisplay
 from xgboost import XGBRegressor
 
+import tensorflow as tf
+
 import warnings
 import pandas as pd
 import numpy as np
@@ -355,3 +357,105 @@ class ANNExperimentsV1:
         self.plot_training_history()
         # self.plot_predictions_vs_actual(y_pred)
         self.plot_line_comparison(y_pred, model_param_string)
+
+
+class PredictionIntervalEstimation(ANNExperimentsV1):
+    def __init__(self, data, features=['HH', 'HV'], target='SM', test_size=0.1, val_size=0.25, random_state=42, satellite=None):
+        super().__init__(data, features=['HH', 'HV'], target='SM', test_size=0.1, val_size=0.25, random_state=42, satellite=None)
+
+    def pinball_loss(self, y_true, y_pred, tau):
+        error = y_true - y_pred
+        return tf.reduce_mean(tf.maximum(tau * error, (tau - 1) * error))
+
+    def lower_quantile_loss(self, y_true, y_pred):
+        return self.pinball_loss(y_true, y_pred, tau=0.025)
+    
+    def upper_quantile_loss(self, y_true, y_pred):
+        return self.pinball_loss(y_true, y_pred, tau=0.975)
+
+    def train_model(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0):
+        self.upper_model = tf.keras.models.clone_model(model)
+        self.lower_model = tf.keras.models.clone_model(model)
+
+        # compile both models
+        self.lower_model.compile(
+            optimizer=optimizer,
+            loss=self.lower_quantile_loss
+        )
+        self.upper_model.compile(
+            optimizer=optimizer,
+            loss=self.upper_quantile_loss
+        )
+
+        print("\n--------- TRAINING UPPER MODEL -----------\n")
+        self.upper_model_history = self.upper_model.fit(
+            self.X_train_scaled, self.y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(self.X_val_scaled, self.y_val),
+            verbose=verbose
+        )
+
+        print("\n--------- TRAINING LOWER MODEL -----------\n")
+        self.lower_model_history = self.lower_model.fit(
+            self.X_train_scaled, self.y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(self.X_val_scaled, self.y_val),
+            verbose=verbose
+        )
+
+        y_preds_lower = self.lower_model.predict(self.X_test_scaled)
+        y_preds_upper = self.upper_model.predict(self.X_test_scaled)
+
+        return y_preds_lower, y_preds_upper
+
+    def plot_training_history(self):
+        plt.figure(figsize=(12, 4))
+        plt.suptitle("Upper and Lower Model Training Loss")
+        plt.subplot(1, 2, 1)
+        plt.plot(self.upper_model_history.history['loss'], label='Training Loss')
+        plt.plot(self.upper_model_history.history['val_loss'], label='Validation Loss')
+        plt.title('Upper Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        plt.subplot(1, 2, 2)
+        plt.plot(self.lower_model_history.history['loss'], label='Training Loss')
+        plt.plot(self.lower_model_history.history['val_loss'], label='Validation Loss')
+        plt.title('Upper Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.show()
+
+    def evaluate_model(self, y_preds_lower, y_preds_upper):
+        
+        def picp(y_pred_lower, y_pred_upper):
+            """Prediction Interval Coverage Probability"""
+            covered = np.sum((self.y_test >= y_pred_lower) & (self.y_test <= y_pred_upper))
+            return covered / len(self.y_test)
+
+        def mpiw(y_pred_lower, y_pred_upper):
+            """Mean Prediction Interval Width"""
+            return np.mean(y_pred_upper - y_pred_lower)
+
+        
+        return {
+            'PICP': picp(y_preds_lower, y_preds_upper),
+            'MPIW': mpiw(y_preds_lower, y_preds_upper)
+        }
+
+    def run_experiment(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0, model_param_string=None):
+        y_preds_lower, y_preds_upper = self.train_model()
+        self.plot_training_history()
+        eval_dict = self.evaluate_model(y_preds_lower, y_preds_upper)
+
+        print('\nModel Results - \n')
+        print(f"PICP: {eval_dict['PICP'] * 100:.2f}%") 
+        print(f"MPIW: {eval_dict['MPIW']:.4f}")
+
+        
