@@ -447,10 +447,14 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
             callbacks=[progress, early_stopping]
         )
 
-        y_preds_lower = self.lower_model.predict(self.X_test_scaled)
-        y_preds_upper = self.upper_model.predict(self.X_test_scaled)
+        # Predict on both test and validation sets
+        y_preds_lower_test = self.lower_model.predict(self.X_test_scaled)
+        y_preds_upper_test = self.upper_model.predict(self.X_test_scaled)
+        y_preds_lower_val = self.lower_model.predict(self.X_val_scaled)
+        y_preds_upper_val = self.upper_model.predict(self.X_val_scaled)
 
-        return y_preds_lower.flatten(), y_preds_upper.flatten ()
+        return (y_preds_lower_test.flatten(), y_preds_upper_test.flatten(),
+                y_preds_lower_val.flatten(), y_preds_upper_val.flatten())
 
     def plot_training_history(self, model_param_string):
         plt.figure(figsize=(12, 4))
@@ -474,42 +478,50 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
         plt.tight_layout()
         plt.show()
 
-    def evaluate_model(self, y_preds_lower, y_preds_upper):
+    def evaluate_model(self, y_true, y_pred_lower, y_pred_upper):
         
-        def picp(y_pred_lower, y_pred_upper):
+        def picp(y_true_vals, y_pred_lower_vals, y_pred_upper_vals):
             """Prediction Interval Coverage Probability"""
-            covered = np.sum((self.y_test >= y_pred_lower) & (self.y_test <= y_pred_upper))
-            return covered / len(self.y_test)
+            covered = np.sum((y_true_vals >= y_pred_lower_vals) & (y_true_vals <= y_pred_upper_vals))
+            return covered / len(y_true_vals)
 
-        def mpiw(y_pred_lower, y_pred_upper):
+        def mpiw(y_pred_lower_vals, y_pred_upper_vals):
             """Mean Prediction Interval Width"""
-            return np.mean(y_pred_upper - y_pred_lower)
+            return np.mean(y_pred_upper_vals - y_pred_lower_vals)
 
-        
         return {
-            'PICP': picp(y_preds_lower, y_preds_upper),
-            'MPIW': mpiw(y_preds_lower, y_preds_upper)
+            'PICP': picp(y_true, y_pred_lower, y_pred_upper),
+            'MPIW': mpiw(y_pred_lower, y_pred_upper)
         }
 
-    def plot_prediction_interval(self, y_pred_lower, y_pred_upper, model_param_string):
+    def plot_prediction_interval(self, y_pred_lower_test, y_pred_upper_test, y_pred_lower_val, y_pred_upper_val, model_param_string):
         indices = range(len(self.y_test))
 
-        eval_dict = self.evaluate_model(y_pred_lower, y_pred_upper)
+        # Calculate metrics for both test and validation sets
+        test_eval_dict = self.evaluate_model(self.y_test, y_pred_lower_test, y_pred_upper_test)
+        val_eval_dict = self.evaluate_model(self.y_val, y_pred_lower_val, y_pred_upper_val)
 
         plt.figure(figsize=(14, 7))
-        plt.plot(indices, self.y_test, 'o', color='blue', label='Actual Soil Moisture')
-        plt.plot(indices, y_pred_lower, color='red', linestyle='--', label='Lower Bound')
-        plt.plot(indices, y_pred_upper, color='orange', linestyle='--', label='Upper Bound')
+        plt.plot(indices, self.y_test, 'o', color='blue', label='Actual Soil Moisture (Test Set)')
+        plt.plot(indices, y_pred_lower_test, color='red', linestyle='--', label='Lower Bound')
+        plt.plot(indices, y_pred_upper_test, color='orange', linestyle='--', label='Upper Bound')
 
-        # Fill the area between the bounds to show the interval
-        plt.fill_between(indices, y_pred_lower, y_pred_upper, color='gray', alpha=0.2, label='95% Prediction Interval')
+        plt.fill_between(indices, y_pred_lower_test, y_pred_upper_test, color='gray', alpha=0.2, label='95% Prediction Interval')
 
-        metrics_text = f"PICP: {eval_dict['PICP']*100:.2f}\nMPIW: {eval_dict['MPIW']:.4f}"
+        # Create a clean, aligned text box for both metrics
+        test_metrics = f"Test  | PICP: {test_eval_dict['PICP']*100:5.2f}% | MPIW: {test_eval_dict['MPIW']:.4f}"
+        val_metrics =  f"Valid | PICP: {val_eval_dict['PICP']*100:5.2f}% | MPIW: {val_eval_dict['MPIW']:.4f}"
+        metrics_text = f"{test_metrics}\n{val_metrics}"
+        
         plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8), 
-                verticalalignment='top', fontsize=12)
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8), 
+                    verticalalignment='top', fontsize=12,
+                    # Using a monospaced font for clean alignment
+                    fontname='monospace')
         
         plot_dir = f"/home/kshipra/work/major/ml experiments/output/plots/{self.satellite}/PI"
+        if not os.path.exists(plot_dir):
+            os.makedirs(plot_dir)
 
         plt.xlabel('Sample Index')
         plt.ylabel('Soil Moisture')
@@ -520,7 +532,16 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
         plt.show()
 
     def run_experiment(self, model, optimizer='adam', epochs=200, learning_rate=0.01, batch_size=32, verbose=0, model_param_string=None):
-        y_preds_lower, y_preds_upper = self.train_model(model, optimizer=optimizer, epochs=epochs, 
-                                                        batch_size=batch_size, verbose=verbose, learning_rate=learning_rate)
+    # Unpack all four returned prediction arrays
+        y_preds_lower_test, y_preds_upper_test, y_preds_lower_val, y_preds_upper_val = self.train_model(
+            model, optimizer=optimizer, epochs=epochs, batch_size=batch_size, verbose=verbose, learning_rate=learning_rate
+        )
+        
         self.plot_training_history(model_param_string)
-        self.plot_prediction_interval(y_preds_lower, y_preds_upper, model_param_string)
+        
+        # Pass all four arrays to the plotting function
+        self.plot_prediction_interval(
+            y_preds_lower_test, y_preds_upper_test,
+            y_preds_lower_val, y_preds_upper_val,
+            model_param_string
+        )
