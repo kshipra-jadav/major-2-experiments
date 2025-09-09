@@ -246,10 +246,6 @@ class ANNExperimentsV1:
             X_temp, y_temp, test_size=self.val_size, random_state=self.random_state
         )
         
-        print(f"Training set: {self.X_train.shape[0]} samples")
-        print(f"Validation set: {self.X_val.shape[0]} samples")
-        print(f"Test set: {self.X_test.shape[0]} samples")
-        
         # Scale the features
         self.scaler = MinMaxScaler()
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)
@@ -383,11 +379,9 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
     def __init__(self, data, features=['HH', 'HV'], target='SM', test_size=0.1, val_size=0.25, random_state=42, satellite=None):
         super().__init__(data, features=features, target=target, test_size=test_size, 
                          val_size=val_size, random_state=random_state, satellite=satellite)
-        print(f"X_train shape: {self.X_train.shape}")
-        print(f"X_test shape:  {self.X_test.shape}")
-        print(f"y_train shape: {self.y_train.shape}")
-        print(f"y_test shape:  {self.y_test.shape}")
-
+        
+        np.random.seed(random_state)
+        tf.random.set_seed(random_state)
 
     def pinball_loss(self, y_true, y_pred, tau):
         error = y_true - y_pred
@@ -424,7 +418,7 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
         )
 
 
-        print("\n--------- TRAINING UPPER MODEL -----------\n")
+        # print("--------- TRAINING UPPER MODEL -----------\n")
         early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
         progress = EpochTqdm(total_epochs=epochs)
         self.upper_model_history = self.upper_model.fit(
@@ -435,7 +429,7 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
             verbose=verbose,
             callbacks=[progress, early_stopping]
         )
-        print("\n--------- TRAINING LOWER MODEL -----------\n")
+        # print("--------- TRAINING LOWER MODEL -----------\n")
         progress = EpochTqdm(total_epochs=epochs)
         early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
         self.lower_model_history = self.lower_model.fit(
