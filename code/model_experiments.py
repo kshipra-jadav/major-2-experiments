@@ -539,3 +539,55 @@ class PredictionIntervalEstimation(ANNExperimentsV1):
             y_preds_lower_val, y_preds_upper_val,
             model_param_string
         )
+
+
+class PredictionIntervalWithTubeLoss(ANNExperimentsV1):
+    def __init__(self, data, features, target, test_size=0.1, val_size=0.25, random_state=42, satellite=None, q=0.95, r=0.5, delta=0):
+        super().__init__(data, features=features, target=target, test_size=test_size, 
+                         val_size=val_size, random_state=random_state, satellite=satellite)
+        
+        np.random.seed(random_state)
+        tf.random.set_seed(random_state)
+    
+
+        # hyperparameters for Tube Loss
+        self.q = q # target coverage # default: 0.95
+        self.r= r  # for movement of PI tube # default: 0.5
+        self.delta = delta #  for recalibration # default: 0
+
+
+    def confidence_loss(self, y_true, y_pred):
+        y_true = y_true[:, 0]
+        f2 = y_pred[:, 0]
+        f1 = y_pred[:, 1]
+
+        c1 = (1 - q) * (f2 - y_true)
+        c2 = (1 - q) * (y_true - f1)
+        c3 = q * (f1 - y_true)
+        c4 = q * (y_true - f2)
+
+        # Use tf.where to create a tensor based on conditions
+        loss_part1 = tf.where(y_true > r * (f1 + f2), c1, c2)
+        loss_part2 = tf.where(f1 > y_true, c3, c4)
+
+        final_loss = tf.where(tf.logical_and(y_true <= f2, y_true >= f1), loss_part1, loss_part2) + (delta * tf.abs(f1 - f2))
+
+        # Reduce the loss to a scalar using tf.reduce_mean
+        return tf.reduce_mean(final_loss)
+    
+
+    def train_model(self, model, optimizer, num_epochs=100, batch_size=32):
+        loss = tf.keras.loss
+        model.compile(optimizer=optimizer, loss=self.confidence_loss)
+
+        progress = EpochTqdm(total_epochs=num_epochs)
+
+        model.fit(
+            self.X_train_scaled, self.y_train,
+            validation_data=(self.X_val_scaled, self.y_val),
+            epochs=num_epochs,
+            batch_size=batch_size,
+            verbose=0,
+            callbacks=[progress]
+        )
+
