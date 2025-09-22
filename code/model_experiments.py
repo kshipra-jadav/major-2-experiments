@@ -561,33 +561,102 @@ class PredictionIntervalWithTubeLoss(ANNExperimentsV1):
         f2 = y_pred[:, 0]
         f1 = y_pred[:, 1]
 
-        c1 = (1 - q) * (f2 - y_true)
-        c2 = (1 - q) * (y_true - f1)
-        c3 = q * (f1 - y_true)
-        c4 = q * (y_true - f2)
+        c1 = (1 - self.q) * (f2 - y_true)
+        c2 = (1 - self.q) * (y_true - f1)
+        c3 = self.q * (f1 - y_true)
+        c4 = self.q * (y_true - f2)
 
         # Use tf.where to create a tensor based on conditions
-        loss_part1 = tf.where(y_true > r * (f1 + f2), c1, c2)
+        loss_part1 = tf.where(y_true > self.r * (f1 + f2), c1, c2)
         loss_part2 = tf.where(f1 > y_true, c3, c4)
 
-        final_loss = tf.where(tf.logical_and(y_true <= f2, y_true >= f1), loss_part1, loss_part2) + (delta * tf.abs(f1 - f2))
+        final_loss = tf.where(tf.logical_and(y_true <= f2, y_true >= f1), loss_part1, loss_part2) + (self.delta * tf.abs(f1 - f2))
 
         # Reduce the loss to a scalar using tf.reduce_mean
         return tf.reduce_mean(final_loss)
     
 
     def train_model(self, model, optimizer, num_epochs=100, batch_size=32):
-        loss = tf.keras.loss
-        model.compile(optimizer=optimizer, loss=self.confidence_loss)
+        tf.keras.backend.clear_session()
+
+        self.model = tf.keras.models.clone_model(model)
+        self.model.compile(optimizer=optimizer, loss=self.confidence_loss)
 
         progress = EpochTqdm(total_epochs=num_epochs)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 
-        model.fit(
+        self.history = self.model.fit(
             self.X_train_scaled, self.y_train,
             validation_data=(self.X_val_scaled, self.y_val),
             epochs=num_epochs,
             batch_size=batch_size,
             verbose=0,
-            callbacks=[progress]
+            callbacks=[progress, early_stopping]
         )
+    
+    def plot_losses(self):
+        plt.figure(figsize=(12, 4))
+        plt.title('Model Loss')
+        plt.plot(self.history.history['loss'], label='Training Loss')
+        plt.plot(self.history.history['val_loss'], label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
 
+        plt.tight_layout()
+        plt.show()
+    
+    def evaluate_model(self, type='test'):
+        if type == 'test':
+            y_preds = self.model.predict(self.X_test_scaled, verbose=0)
+            y_test = np.stack((self.y_test, self.y_test), axis=1)
+            
+        if type == 'val':
+            y_preds = self.model.predict(self.X_val_scaled, verbose=0)
+            y_test = np.stack((self.y_val, self.y_val), axis=1)
+
+        upper_preds = y_preds[:, 0]
+        lower_preds = y_preds[:, 1]
+
+        K_u = upper_preds > y_test[:, 0]
+        K_l = lower_preds < y_test[:, 1]
+
+        picp = np.mean(K_u * K_l)
+        mpiw = np.round(np.mean(upper_preds - lower_preds), 3)
+
+        results = {
+            'PICP': picp,
+            'MPIW': mpiw
+        }
+        return upper_preds, lower_preds, results
+
+    def plot_prediction_interval(self):
+        indices = range(len(self.y_test))
+
+        y_pred_upper_test, y_pred_lower_test, test_results = self.evaluate_model()
+        _, _, val_results = self.evaluate_model(type='val')
+
+        plt.figure(figsize=(14, 7))
+        plt.plot(indices, self.y_test, 'o', color='blue', label='Actual Soil Moisture (Test Set)')
+        plt.plot(indices, y_pred_lower_test, color='red', linestyle='--', label='Lower Bound')
+        plt.plot(indices, y_pred_upper_test, color='orange', linestyle='--', label='Upper Bound')
+
+        plt.fill_between(indices, y_pred_lower_test, y_pred_upper_test, color='gray', alpha=0.2, label='95% Prediction Interval')
+
+        # Create a clean, aligned text box for both metrics
+        test_metrics = f"Test  | PICP: {test_results['PICP']*100:5.2f}% | MPIW: {test_results['MPIW']:.4f}"
+        val_metrics =  f"Valid | PICP: {val_results['PICP']*100:5.2f}% | MPIW: {val_results['MPIW']:.4f}"
+        metrics_text = f"{test_metrics}\n{val_metrics}"
+        
+        plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8), 
+                    verticalalignment='top', fontsize=12,
+                    # Using a monospaced font for clean alignment
+                    fontname='monospace')
+        
+        plt.xlabel('Sample Index')
+        plt.ylabel('Soil Moisture')
+        plt.title(f'Prediction Interval for Soil Moisture')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.show()
