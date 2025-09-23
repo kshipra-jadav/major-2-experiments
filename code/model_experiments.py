@@ -15,6 +15,7 @@ import warnings
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import os
 from pathlib import Path
 
@@ -630,13 +631,13 @@ class PredictionIntervalWithTubeLoss(ANNExperimentsV1):
         }
         return upper_preds, lower_preds, results
 
-    def plot_prediction_interval(self):
+    def plot_prediction_interval(self, model_param_string, save_fig=False):
         indices = range(len(self.y_test))
 
         y_pred_upper_test, y_pred_lower_test, test_results = self.evaluate_model()
         _, _, val_results = self.evaluate_model(type='val')
 
-        plt.figure(figsize=(14, 7))
+        plt.figure(figsize=(16, 7))
         plt.plot(indices, self.y_test, 'o', color='blue', label='Actual Soil Moisture (Test Set)')
         plt.plot(indices, y_pred_lower_test, color='red', linestyle='--', label='Lower Bound')
         plt.plot(indices, y_pred_upper_test, color='orange', linestyle='--', label='Upper Bound')
@@ -653,10 +654,76 @@ class PredictionIntervalWithTubeLoss(ANNExperimentsV1):
                     verticalalignment='top', fontsize=12,
                     # Using a monospaced font for clean alignment
                     fontname='monospace')
-        
+        savepath = f"/home/kshipra/work/major/ml experiments/output/plots/{self.satellite}/PI/TubeLoss/"
+        os.makedirs(savepath, exist_ok=True)
         plt.xlabel('Sample Index')
         plt.ylabel('Soil Moisture')
-        plt.title(f'Prediction Interval for Soil Moisture')
+        plt.title(f'Prediction Interval for Soil Moisture\n{self.satellite} - {model_param_string}\nr={self.r}   |   delta={self.delta}')
         plt.legend()
         plt.grid(True, alpha=0.3)
+
+        if save_fig:
+            plt.savefig(f"{savepath}/{model_param_string}.png", dpi=200, bbox_inches="tight")
+        
+        plt.show()
+    
+    def run_experiment(self, model, optimizer, epochs=200, batch_size=32, 
+                       model_param_string=None, plot_losses=False, return_preds=False, 
+                       save_fig=False, plot_interval=True):
+        self.train_model(model=model, optimizer=optimizer, num_epochs=epochs, batch_size=batch_size)
+        if plot_losses:
+            self.plot_losses()
+        if plot_interval:
+            self.plot_prediction_interval(model_param_string=model_param_string, save_fig=save_fig)
+        if return_preds:
+            _, _, test_results = self.evaluate_model()
+            _, _, val_results = self.evaluate_model('val')
+            return {
+                'test_results': test_results,
+                'val_results': val_results
+            }
+
+        
+            
+        
+
+
+    def plot_prediction_interval_3d(self):
+        # Import the necessary toolkit for 3D plotting
+        # 1. Get the upper and lower predictions for the test set
+        y_pred_upper_test, y_pred_lower_test, _ = self.evaluate_model(type='test')
+
+        # 2. Define the axes for the surface
+        # The X-axis is the index of each sample in the test set
+        sample_indices = np.arange(len(self.y_test))
+        # The Y-axis is a simple array to position the two bounds separately
+        bound_axis = np.array([0, 1])
+
+        # 3. Create a meshgrid from the two axes
+        X_grid, Y_grid = np.meshgrid(sample_indices, bound_axis)
+
+        # 4. Create the Z-grid, which contains the prediction values
+        # The first row corresponds to the lower bound, the second to the upper bound
+        Z_grid = np.vstack([y_pred_lower_test, y_pred_upper_test])
+
+        # 5. Create the 3D plot
+        fig = plt.figure(figsize=(16, 10))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # 6. Plot the prediction interval as a single, continuous surface
+        ax.plot_surface(X_grid, Y_grid, Z_grid, cmap='viridis', alpha=0.8, edgecolor='none')
+
+        # 7. Set the labels, title, and ticks
+        ax.set_xlabel('\nSample Index', fontsize=12)
+        ax.set_ylabel('\nPrediction Bound', fontsize=12)
+        ax.set_zlabel('\nSoil Moisture', fontsize=12)
+        ax.set_title('3D Prediction Interval Landscape', fontsize=16)
+
+        # Use text labels for the Y-axis ticks instead of numbers
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(['Lower', 'Upper'], fontsize=10)
+        
+        # Adjust the viewing angle for a better perspective
+        ax.view_init(elev=25, azim=-110)
+        
         plt.show()
