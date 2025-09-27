@@ -578,7 +578,7 @@ class PredictionIntervalWithTubeLoss(ANNExperimentsV1):
     
 
     def train_model(self, model, optimizer, num_epochs=100, batch_size=32):
-        tf.keras.backend.clear_session()
+        # tf.keras.backend.clear_session() removing this since it messes with the seeds set.
 
         self.model = tf.keras.models.clone_model(model)
         self.model.compile(optimizer=optimizer, loss=self.confidence_loss)
