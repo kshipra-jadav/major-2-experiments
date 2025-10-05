@@ -682,48 +682,93 @@ class PredictionIntervalWithTubeLoss(ANNExperimentsV1):
                 'test_results': test_results,
                 'val_results': val_results
             }
-
+    def plot_prediction_interval_3d(self, feature1_name, feature2_name, model_param_string):
+        import plotly.graph_objects as go
+        from scipy.interpolate import griddata
         
-            
+        X_original_test = self.X_test
+        y_true_test = self.y_test
+        y_pred_upper_test, y_pred_lower_test, test_results = self.evaluate_model()
+        _, _, val_results = self.evaluate_model(type='val')
+
+        # 2. Create a grid and interpolate (same as before)
+        grid_res = 100
+        x_grid = np.linspace(X_original_test[feature1_name].min(), X_original_test[feature1_name].max(), grid_res)
+        y_grid = np.linspace(X_original_test[feature2_name].min(), X_original_test[feature2_name].max(), grid_res)
+        X_mesh, Y_mesh = np.meshgrid(x_grid, y_grid)
+
+        Z_upper_mesh = griddata(
+            (X_original_test[feature1_name], X_original_test[feature2_name]),
+            y_pred_upper_test, (X_mesh, Y_mesh), method='cubic'
+        )
+        Z_lower_mesh = griddata(
+            (X_original_test[feature1_name], X_original_test[feature2_name]),
+            y_pred_lower_test, (X_mesh, Y_mesh), method='cubic'
+        )
+
+        # 3. Create the interactive 3D plot with Plotly
+        fig = go.Figure()
+
+        # Add the Upper Bound Surface
+        fig.add_trace(go.Surface(
+            x=X_mesh, y=Y_mesh, z=Z_upper_mesh,
+            opacity=0.5,
+            colorscale=[[0, 'orange'], [1, 'orange']], # Solid color
+            showscale=False,
+            name='Upper Bound'
+        ))
+
+        # Add the Lower Bound Surface
+        fig.add_trace(go.Surface(
+            x=X_mesh, y=Y_mesh, z=Z_lower_mesh,
+            opacity=0.5,
+            colorscale=[[0, 'red'], [1, 'red']], # Solid color
+            showscale=False,
+            name='Lower Bound'
+        ))
+
+        # Add the Actual Data Points
+        fig.add_trace(go.Scatter3d(
+            x=X_original_test[feature1_name],
+            y=X_original_test[feature2_name],
+            z=y_true_test,
+            mode='markers',
+            marker=dict(size=3, color='blue'),
+            name='Actual Soil Moisture'
+        ))
+
+        # 4. Create metrics text and layout
+        test_metrics = f"Test  | PICP: {test_results['PICP']*100:5.2f}% | MPIW: {test_results['MPIW']:.4f}"
+        val_metrics =  f"Valid | PICP: {val_results['PICP']*100:5.2f}% | MPIW: {val_results['MPIW']:.4f}"
+        metrics_text = f"<b>Metrics</b><br>{test_metrics}<br>{val_metrics}"
+
+        fig.update_layout(
+            title=f'3D Prediction Interval for Soil Moisture<br>{self.satellite} - {model_param_string}',
+            scene=dict(
+                xaxis_title=f'Feature: {feature1_name}',
+                yaxis_title=f'Feature: {feature2_name}',
+                zaxis_title='Soil Moisture',
+                # Aspect ratio can be adjusted for better viewing
+                aspectratio=dict(x=1.5, y=1.5, z=1)
+            ),
+            margin=dict(l=0, r=0, b=0, t=40),
+            legend=dict(x=0.01, y=0.95),
+            # Add the annotation text box
+            annotations=[
+                dict(
+                    text=metrics_text,
+                    x=0.01, y=0.98,
+                    xref='paper', yref='paper',
+                    align='left',
+                    showarrow=False,
+                    bgcolor='rgba(255, 255, 255, 0.8)',
+                    bordercolor='black',
+                    borderwidth=1,
+                    font=dict(family='monospace', size=12)
+                )
+            ]
+        )
         
-
-
-    def plot_prediction_interval_3d(self):
-        # Import the necessary toolkit for 3D plotting
-        # 1. Get the upper and lower predictions for the test set
-        y_pred_upper_test, y_pred_lower_test, _ = self.evaluate_model(type='test')
-
-        # 2. Define the axes for the surface
-        # The X-axis is the index of each sample in the test set
-        sample_indices = np.arange(len(self.y_test))
-        # The Y-axis is a simple array to position the two bounds separately
-        bound_axis = np.array([0, 1])
-
-        # 3. Create a meshgrid from the two axes
-        X_grid, Y_grid = np.meshgrid(sample_indices, bound_axis)
-
-        # 4. Create the Z-grid, which contains the prediction values
-        # The first row corresponds to the lower bound, the second to the upper bound
-        Z_grid = np.vstack([y_pred_lower_test, y_pred_upper_test])
-
-        # 5. Create the 3D plot
-        fig = plt.figure(figsize=(16, 10))
-        ax = fig.add_subplot(111, projection='3d')
-
-        # 6. Plot the prediction interval as a single, continuous surface
-        ax.plot_surface(X_grid, Y_grid, Z_grid, cmap='viridis', alpha=0.8, edgecolor='none')
-
-        # 7. Set the labels, title, and ticks
-        ax.set_xlabel('\nSample Index', fontsize=12)
-        ax.set_ylabel('\nPrediction Bound', fontsize=12)
-        ax.set_zlabel('\nSoil Moisture', fontsize=12)
-        ax.set_title('3D Prediction Interval Landscape', fontsize=16)
-
-        # Use text labels for the Y-axis ticks instead of numbers
-        ax.set_yticks([0, 1])
-        ax.set_yticklabels(['Lower', 'Upper'], fontsize=10)
+        fig.show()
+                
         
-        # Adjust the viewing angle for a better perspective
-        ax.view_init(elev=25, azim=-110)
-        
-        plt.show()
