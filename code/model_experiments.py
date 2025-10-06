@@ -8,6 +8,10 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.pipeline import Pipeline
 from xgboost import XGBRegressor
 
+from mapie.regression import SplitConformalRegressor, CrossConformalRegressor
+from mapie.utils import train_conformalize_test_split
+from mapie.metrics.regression import regression_coverage_score, regression_mean_width_score, coverage_width_based
+
 from tensorflow.keras.callbacks import EarlyStopping
 import tensorflow as tf
 
@@ -16,6 +20,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import seaborn as sns
 import os
 from pathlib import Path
 
@@ -685,7 +690,7 @@ class PredictionIntervalWithTubeLoss(ANNExperimentsV1):
     def plot_prediction_interval_3d(self, feature1_name, feature2_name, model_param_string):
         import plotly.graph_objects as go
         from scipy.interpolate import griddata
-        
+
         X_original_test = self.X_test
         y_true_test = self.y_test
         y_pred_upper_test, y_pred_lower_test, test_results = self.evaluate_model()
@@ -771,4 +776,325 @@ class PredictionIntervalWithTubeLoss(ANNExperimentsV1):
         
         fig.show()
                 
+class ConformalRegression:
+    def __init__(self, data, features, target, random_seed, train_size=0.6, conf_size=0.2, test_size=0.2):
+        self.data = data
+        self.features = features
+        self.target = target
+        self.train_size = train_size
+        self.conf_size = conf_size
+        self.test_size = test_size
+        self.random_seed = random_seed
+
+        np.random.seed(random_seed)
+        tf.random.set_seed(random_seed)
+
+        self._prepare_data()
+
+
+    def _prepare_data(self):
+        '''
+        Split the data into train, calibration and test set
+        '''
+        (
+            X_train, X_cal, X_test,
+            y_train, y_cal, y_test
+        ) = train_conformalize_test_split(self.data[self.features], self.data[self.target], 
+                                          train_size=self.train_size, conformalize_size=self.conf_size, 
+                                          test_size=self.test_size, random_state=self.random_seed)
+
+        self.X_train = X_train
+        self.X_conf = X_cal
+        self.X_test = X_test
+
+        self.y_train = y_train.values.ravel()
+        self.y_conf = y_cal.values.ravel()
+        self.y_test = y_test.values.ravel()
+
+        total = len(self.data)
+        print(
+            "Split sizes:\n"
+            f"  Train    - X: {getattr(self.X_train, 'shape', (len(self.X_train),))}, y: {len(self.y_train)} ({len(self.y_train)/total:.1%})\n"
+            f"  Conformal- X: {getattr(self.X_conf,  'shape', (len(self.X_conf), ))}, y: {len(self.y_conf)} ({len(self.y_conf)/total:.1%})\n"
+            f"  Test     - X: {getattr(self.X_test,  'shape', (len(self.X_test), ))}, y: {len(self.y_test)} ({len(self.y_test)/total:.1%})\n"
+            f"  Original data rows: {total}"
+        )
+    
+    def run_experiment(self, estimator_str: str = "RandomForest", confidence_level=0.95):
+        estimator = None
+        if estimator_str == "RandomForest":
+            estimator = RandomForestRegressor(random_state=self.random_seed)
+        elif estimator_str == "AdaBoost":
+            estimator = AdaBoostRegressor(estimator=DecisionTreeRegressor(random_state=self.random_seed), 
+                                          random_state=self.random_seed)
+        elif estimator_str == "SVR":
+            estimator = SVR()
+        elif estimator_str == "XGBoost":
+            estimator = XGBRegressor()
         
+        mapie_regressor = SplitConformalRegressor(estimator=estimator, confidence_level=confidence_level,
+                                                  prefit=False, verbose=1)
+        
+        mapie_regressor.fit(self.X_train, self.y_train)
+        mapie_regressor.conformalize(self.X_conf, self.y_conf)
+
+        y_preds, intervals = mapie_regressor.predict_interval(self.X_test)
+
+        upper_interval = intervals[:, 0, 0]
+        lower_interval = intervals[:, 1, 0]
+
+        print(f"Y preds shape - {y_preds.shape}")
+        print(f"interval shape - {intervals.shape}")
+        print(f"Upper interval shape - {upper_interval.shape}")
+        print(f"Lower interval shape - {lower_interval.shape}")
+
+        self.lower_interval = lower_interval
+        self.upper_interval = upper_interval
+        self.intervals = intervals
+        self.y_preds = y_preds
+
+        self.evaluate_model(confidence_level)
+        self.plot_prediction_intervals()
+
+    def evaluate_model(self, confidence_level):
+        """
+        Calculates and prints key performance metrics for the conformal regression model.
+        """
+        print("\n--- Model Evaluation ---")
+        
+        coverage = regression_coverage_score(self.y_test, self.intervals)
+        print(f"Effective Coverage: {coverage[0]:.3f} (target: {confidence_level})")
+        
+        width = regression_mean_width_score(self.intervals)
+        print(f"Average Interval Width: {width[0]:.3f}")
+        
+        print("------------------------\n")
+
+    def plot_prediction_intervals(self):
+        """
+        Generates a plot to visualize the prediction intervals against the true values.
+        """
+        # Sort values for a cleaner plot
+        order = np.argsort(self.y_test)
+        y_test_sorted = self.y_test[order]
+        y_preds_sorted = self.y_preds[order]
+        lower_interval_sorted = self.lower_interval[order]
+        upper_interval_sorted = self.upper_interval[order]
+
+        plt.style.use('seaborn-v0_8-whitegrid')
+        fig, ax = plt.subplots(figsize=(10, 7))
+
+        # Plot the model's predictions
+        ax.plot(y_test_sorted, y_preds_sorted, 'o', color='royalblue', label='Model Predictions', markersize=5)
+
+        # Plot the prediction intervals as a shaded area
+        ax.fill_between(
+            y_test_sorted,
+            lower_interval_sorted,
+            upper_interval_sorted,
+            alpha=0.2,
+            color='royalblue',
+            label='Prediction Interval'
+        )
+        
+        ax.set_xlabel("True Values", fontsize=12)
+        ax.set_ylabel("Predicted Values", fontsize=12)
+        ax.set_title("Prediction Intervals vs. True Values", fontsize=14)
+        ax.legend(loc="upper left")
+        ax.grid(True)
+        plt.show()
+
+
+class NewConformalRegression:
+    """
+    An enhanced class to run, evaluate, and compare various conformal regression experiments.
+    """
+    def __init__(self, data, features, target, random_seed=42):
+        self.data = data
+        self.features = features
+        self.target = target
+        self.random_seed = random_seed
+        self.results_ = {}
+
+        np.random.seed(random_seed)
+        tf.random.set_seed(random_seed)
+
+    def _prepare_split_data(self, train_size=0.6, conf_size=0.2, test_size=0.2):
+        """Prepares data for split-conformal methods."""
+        (
+            X_train, X_cal, X_test,
+            y_train, y_cal, y_test
+        ) = train_conformalize_test_split(
+            self.data[self.features], self.data[self.target],
+            train_size=train_size, conformalize_size=conf_size,
+            test_size=test_size, random_state=self.random_seed
+        )
+        self.split_data = {
+            "X_train": X_train, "y_train": y_train.values.ravel(),
+            "X_conf": X_cal, "y_conf": y_cal.values.ravel(),
+            "X_test": X_test, "y_test": y_test.values.ravel()
+        }
+        print("Data prepared for Split Conformal methods.")
+        
+    def _prepare_cv_data(self, train_size=0.8, test_size=0.2):
+        """Prepares data for cross-conformal methods."""
+        X = self.data[self.features]
+        y = self.data[self.target]
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=self.random_seed
+        )
+        self.cv_data = {
+            "X_train": X_train, "y_train": y_train.values.ravel(),
+            "X_test": X_test, "y_test": y_test.values.ravel()
+        }
+        print("Data prepared for Cross-Conformal methods.")
+
+    def run_experiments(self, experiments_to_run):
+        """
+        Run a series of conformal regression experiments.
+        
+        :param experiments_to_run: List of dictionaries, each specifying an experiment.
+        """
+        self._prepare_split_data()
+        self._prepare_cv_data()
+        
+        for exp in experiments_to_run:
+            print(f"\n--- Running Experiment: {exp['name']} ---")
+            
+            confidence = exp['confidence']
+            estimator = exp['estimator']
+            mapie_method = exp['mapie_method']
+            
+            # CORRECTED: Instantiate with confidence_level as per the correct API
+            if mapie_method == SplitConformalRegressor:
+                mapie = SplitConformalRegressor(estimator=estimator, confidence_level=confidence, prefit=False)
+                data = self.split_data
+                mapie.fit(data['X_train'], data['y_train'])
+                mapie.conformalize(data['X_conf'], data['y_conf'])
+                # CORRECTED: predict_interval does not take alpha/confidence_level
+                y_preds, intervals = mapie.predict_interval(data['X_test'])
+
+            elif mapie_method == CrossConformalRegressor:
+                # CORRECTED: Instantiate with confidence_level and default cv
+                mapie = CrossConformalRegressor(estimator=estimator, confidence_level=confidence)
+                data = self.cv_data
+                mapie.fit_conformalize(data['X_train'], data['y_train'])
+                # CORRECTED: predict_interval does not take alpha/confidence_level
+                y_preds, intervals = mapie.predict_interval(data['X_test'])
+
+            # Evaluate and store results
+            y_test = data['y_test']
+            coverage = regression_coverage_score(y_test, intervals)
+            width = regression_mean_width_score(intervals)
+            
+            self.results_[exp['name']] = {
+                'y_preds': y_preds,
+                'intervals': intervals,
+                'y_test': y_test,
+                'coverage': coverage[0],
+                'width': width[0],
+                'confidence': confidence
+            }
+            print(f"Coverage: {coverage[0]:.3f} (Target: {confidence}) | Width: {width[0]:.3f}")
+
+    def plot_model_comparison(self):
+        """Plots a bar chart comparing the coverage and width of all run experiments."""
+        if not self.results_:
+            print("No experiment results to plot. Please run experiments first.")
+            return
+            
+        results_df = pd.DataFrame(self.results_).T.reset_index()
+        results_df.rename(columns={'index': 'Model'}, inplace=True)
+
+        fig, ax = plt.subplots(1, 2, figsize=(16, 7))
+        sns.set_style("whitegrid")
+
+        # Coverage Plot
+        sns.barplot(x='coverage', y='Model', data=results_df, ax=ax[0], palette='viridis')
+        for i, (cov, conf) in enumerate(zip(results_df['coverage'], results_df['confidence'])):
+            ax[0].axvline(x=conf, color='r', linestyle='--', label=f'Target ({conf})' if i == 0 else "")
+            ax[0].text(cov, i, f' {cov:.3f}', va='center', ha='left', color='white', weight='bold')
+        ax[0].set_title('Effective Coverage vs. Target', fontsize=14)
+        ax[0].set_xlabel('Coverage', fontsize=12)
+        ax[0].set_xlim(left=min(results_df['coverage'].min(), results_df['confidence'].min()) * 0.95)
+        ax[0].legend()
+
+        # Width Plot
+        sns.barplot(x='width', y='Model', data=results_df, ax=ax[1], palette='plasma')
+        for i, width in enumerate(results_df['width']):
+            ax[1].text(width, i, f' {width:.3f}', va='center', ha='left', color='white', weight='bold')
+        ax[1].set_title('Average Interval Width', fontsize=14)
+        ax[1].set_xlabel('Width', fontsize=12)
+        
+        plt.tight_layout()
+        plt.show()
+
+    def plot_interval_width_vs_prediction(self, experiment_name):
+        """Plots interval width against the predicted value to check for adaptiveness."""
+        if experiment_name not in self.results_:
+            print(f"Error: Experiment '{experiment_name}' not found.")
+            return
+
+        res = self.results_[experiment_name]
+        widths = res['intervals'][:, 1, 0] - res['intervals'][:, 0, 0]
+        preds = res['y_preds']
+
+        plt.figure(figsize=(10, 6))
+        sns.scatterplot(x=preds, y=widths, alpha=0.6, label="Data points")
+        sns.regplot(x=preds, y=widths, scatter=False, color='red', label="Trendline")
+        plt.xlabel('Predicted Value', fontsize=12)
+        plt.ylabel('Interval Width', fontsize=12)
+        plt.title(f'Interval Width vs. Prediction for {experiment_name}', fontsize=14)
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+        
+    def plot_coverage_calibration(self, experiment_config):
+        """
+        Runs an experiment across multiple confidence levels and plots the calibration.
+        """
+        print(f"\n--- Running Calibration Study for {experiment_config['name']} ---")
+        confidence_levels = np.arange(0.1, 1.0, 0.1)
+        actual_coverages = []
+        
+        mapie_method_class = experiment_config['mapie_method']
+        estimator = experiment_config['estimator']
+        
+        if mapie_method_class == SplitConformalRegressor:
+            data = self.split_data
+            base_mapie = mapie_method_class(estimator=estimator).fit(data['X_train'], data['y_train'])
+            base_mapie.conformalize(data['X_conf'], data['y_conf'])
+            y_test = data['y_test']
+            
+            for conf in confidence_levels:
+                # We need to re-conformalize or re-predict with new confidence, 
+                # but the new API requires re-init. A bit inefficient but correct.
+                mapie_calibrated = SplitConformalRegressor(estimator=estimator, confidence_level=conf, prefit=True)
+                mapie_calibrated.fit(data['X_train'], data['y_train'])
+                mapie_calibrated.conformalize(data['X_conf'], data['y_conf'])
+                _, intervals = mapie_calibrated.predict_interval(data['X_test'])
+                actual_coverages.append(regression_coverage_score(y_test, intervals)[0])
+
+        elif mapie_method_class == CrossConformalRegressor:
+            data = self.cv_data
+            y_test = data['y_test']
+
+            for conf in confidence_levels:
+                # Re-run for each confidence level
+                mapie_calibrated = CrossConformalRegressor(estimator=estimator, confidence_level=conf)
+                mapie_calibrated.fit_conformalize(data['X_train'], data['y_train'])
+                _, intervals = mapie_calibrated.predict_interval(data['X_test'])
+                actual_coverages.append(regression_coverage_score(y_test, intervals)[0])
+        
+        # Plotting
+        plt.figure(figsize=(8, 8))
+        plt.plot(confidence_levels, actual_coverages, "o-", label="Model Calibration")
+        plt.plot([0, 1], [0, 1], "k--", label="Perfect Calibration")
+        plt.xlabel("Target Confidence Level", fontsize=12)
+        plt.ylabel("Actual Coverage", fontsize=12)
+        plt.title(f"Coverage Calibration Plot for {experiment_config['name']}", fontsize=14)
+        plt.legend()
+        plt.grid(True)
+        plt.axis('equal')
+        plt.show()
+
