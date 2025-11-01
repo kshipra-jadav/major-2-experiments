@@ -4,9 +4,11 @@ from sklearn.metrics import accuracy_score, classification_report, mean_absolute
 from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, RandomForestRegressor, AdaBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.svm import SVC, SVR
-from sklearn.pipeline import Pipeline
 from sklearn.model_selection import GridSearchCV
 from xgboost import XGBClassifier, XGBRegressor
+
+from tensorflow.keras.callbacks import EarlyStopping # type: ignore
+import tensorflow as tf
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,6 +16,26 @@ import json
 import os
 
 from constants import OUTPUT_PATH
+
+from tqdm import tqdm
+
+class EpochTqdm(tf.keras.callbacks.Callback):
+    def __init__(self, total_epochs, desc="Epochs"):
+        super().__init__()
+        self.pbar = tqdm(total=total_epochs, desc=desc, unit="epoch")
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        # show loss/val_loss nicely (change keys as needed)
+        postfix = {}
+        if "loss" in logs: postfix["loss"] = f"{logs['loss']:.4f}"
+        if "val_loss" in logs: postfix["val_loss"] = f"{logs['val_loss']:.4f}"
+        if postfix:
+            self.pbar.set_postfix(postfix)
+        self.pbar.update(1)
+    def on_train_end(self, logs=None):
+        self.pbar.close()
+
+
 
 class Experiment:
     def __init__(self, X, y, train_size=0.8, test_size=0.1, val_size=0.1, split_type='train-val-test', print_stats=None):
@@ -327,3 +349,204 @@ class RegressionExperiment(Experiment):
             print(f"Error saving metrics as JSON: {e}")
         
         return results
+
+
+class PredictionIntervalEstimation(Experiment):
+    def __init__(self, X, y, satellite, train_size=0.8, test_size=0.1, val_size=0.1, split_type='train-val-test', print_stats=None):
+        super().__init__(X, y, train_size, test_size, val_size, split_type, print_stats)
+        self.results_path = OUTPUT_PATH / "pi_estimation"
+        self.satellite = satellite
+
+        self.__scale_data()
+
+    def __scale_data(self):
+        self.x_scaler = MinMaxScaler()
+        self.y_scaler = MinMaxScaler()
+
+        self.X_train_scaled = self.x_scaler.fit_transform(self.X_train)
+        self.X_test_scaled = self.x_scaler.transform(self.X_test)
+        self.X_val_scaled = self.x_scaler.transform(self.X_val)
+
+        self.y_train_scaled = self.y_scaler.fit_transform(self.y_train)
+        self.y_test_scaled = self.y_scaler.transform(self.y_test)
+        self.y_val_scaled = self.y_scaler.transform(self.y_val)
+
+        self.y_train = self.y_train.reshape(-1, )
+        self.y_train_scaled = self.y_train_scaled.reshape(-1, )
+        self.y_test = self.y_test.reshape(-1, )
+        self.y_test_scaled = self.y_test_scaled.reshape(-1, )
+        self.y_val = self.y_val.reshape(-1, )
+        self.y_val_scaled = self.y_val_scaled.reshape(-1, )
+
+    def pinball_loss(self, y_true, y_pred, tau):
+        error = y_true - y_pred
+        return tf.reduce_mean(tf.maximum(tau * error, (tau - 1) * error))
+
+    def lower_quantile_loss(self, y_true, y_pred):
+        return self.pinball_loss(y_true, y_pred, tau=0.025)
+    
+    def upper_quantile_loss(self, y_true, y_pred):
+        return self.pinball_loss(y_true, y_pred, tau=0.975)
+
+    def train_model(self, model, learning_rate, optimizer='adam', epochs=200, batch_size=32, verbose=0):
+        self.upper_model = tf.keras.models.clone_model(model)
+        self.lower_model = tf.keras.models.clone_model(model)
+
+        if isinstance(optimizer, str):
+            optimizer_config = {'class_name': optimizer, 'config': {'learning_rate': learning_rate}} # Adam default
+        else:
+            optimizer_config = optimizer.get_config()
+            optimizer_config['class_name'] = optimizer_config['name']
+            del optimizer_config['name']
+
+        # 2. Create two new, independent optimizer instances from that config
+        upper_optimizer = tf.keras.optimizers.get(optimizer_config.copy())
+        lower_optimizer = tf.keras.optimizers.get(optimizer_config.copy())
+        # compile both models
+        self.lower_model.compile(
+            optimizer=lower_optimizer,
+            loss=self.lower_quantile_loss
+        )
+        self.upper_model.compile(
+            optimizer=upper_optimizer,
+            loss=self.upper_quantile_loss
+        )
+
+
+        # print("--------- TRAINING UPPER MODEL -----------\n")
+        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        progress = EpochTqdm(total_epochs=epochs)
+        self.upper_model_history = self.upper_model.fit(
+            self.X_train_scaled, self.y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(self.X_val_scaled, self.y_val),
+            verbose=verbose,
+            callbacks=[progress, early_stopping]
+        )
+        # print("--------- TRAINING LOWER MODEL -----------\n")
+        progress = EpochTqdm(total_epochs=epochs)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        self.lower_model_history = self.lower_model.fit(
+            self.X_train_scaled, self.y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(self.X_val_scaled, self.y_val),
+            verbose=verbose,
+            callbacks=[progress, early_stopping]
+        )
+
+        # Predict on both test and validation sets
+        y_preds_lower_test = self.lower_model.predict(self.X_test_scaled)
+        y_preds_upper_test = self.upper_model.predict(self.X_test_scaled)
+        y_preds_lower_val = self.lower_model.predict(self.X_val_scaled)
+        y_preds_upper_val = self.upper_model.predict(self.X_val_scaled)
+
+        return (y_preds_lower_test.flatten(), y_preds_upper_test.flatten(),
+                y_preds_lower_val.flatten(), y_preds_upper_val.flatten())
+
+    def plot_training_history(self, model_param_string):
+        plt.figure(figsize=(12, 4))
+        plt.suptitle(f"{self.satellite}: {model_param_string}\nUpper and Lower Model Training Loss")
+        plt.subplot(1, 2, 1)
+        plt.plot(self.upper_model_history.history['loss'], label='Training Loss')
+        plt.plot(self.upper_model_history.history['val_loss'], label='Validation Loss')
+        plt.title('Upper Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        plt.subplot(1, 2, 2)
+        plt.plot(self.lower_model_history.history['loss'], label='Training Loss')
+        plt.plot(self.lower_model_history.history['val_loss'], label='Validation Loss')
+        plt.title('Lower Model Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.show()
+
+    def evaluate_model(self, y_true, y_pred_lower, y_pred_upper):
+        
+        def picp(y_true_vals, y_pred_lower_vals, y_pred_upper_vals):
+            """Prediction Interval Coverage Probability"""
+            covered = np.sum((y_true_vals >= y_pred_lower_vals) & (y_true_vals <= y_pred_upper_vals))
+            return covered / len(y_true_vals)
+
+        def mpiw(y_pred_lower_vals, y_pred_upper_vals):
+            """Mean Prediction Interval Width"""
+            return np.mean(y_pred_upper_vals - y_pred_lower_vals)
+
+        return {
+            'PICP': float(picp(y_true, y_pred_lower, y_pred_upper)),
+            'MPIW': float(mpiw(y_pred_lower, y_pred_upper))
+        }
+
+    def plot_prediction_interval(self, y_pred_lower_test, y_pred_upper_test, y_pred_lower_val, y_pred_upper_val, model_param_string):
+        indices = range(len(self.y_test))
+
+        # Calculate metrics for both test and validation sets
+        test_eval_dict = self.evaluate_model(self.y_test, y_pred_lower_test, y_pred_upper_test)
+        val_eval_dict = self.evaluate_model(self.y_val, y_pred_lower_val, y_pred_upper_val)
+
+        plt.figure(figsize=(14, 7))
+        plt.plot(indices, self.y_test, 'o', color='blue', label='Actual Soil Moisture (Test Set)')
+        plt.plot(indices, y_pred_lower_test, color='red', linestyle='--', label='Lower Bound')
+        plt.plot(indices, y_pred_upper_test, color='orange', linestyle='--', label='Upper Bound')
+
+        plt.fill_between(indices, y_pred_lower_test, y_pred_upper_test, color='gray', alpha=0.2, label='95% Prediction Interval')
+
+        # Create a clean, aligned text box for both metrics
+        test_metrics = f"Test  | PICP: {test_eval_dict['PICP']*100:5.2f}% | MPIW: {test_eval_dict['MPIW']:.4f}"
+        val_metrics =  f"Valid | PICP: {val_eval_dict['PICP']*100:5.2f}% | MPIW: {val_eval_dict['MPIW']:.4f}"
+        metrics_text = f"{test_metrics}\n{val_metrics}"
+        
+        plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8), 
+                    verticalalignment='top', fontsize=12,
+                    # Using a monospaced font for clean alignment
+                    fontname='monospace')
+        
+        plot_dir = self.results_path / "plots"
+        if not os.path.exists(plot_dir):
+            os.makedirs(plot_dir)
+
+        plt.xlabel('Sample Index')
+        plt.ylabel('Soil Moisture')
+        plt.title(f'{self.satellite}: {model_param_string}\nPrediction Interval for Soil Moisture')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f"{plot_dir}/{self.satellite}_{model_param_string}.png", dpi=300)
+        # plt.show()
+        plt.close()
+
+    def run_experiment(self, model, optimizer='adam', epochs=200, learning_rate=0.01, batch_size=32, verbose=0, model_param_string=None):
+        # Unpack all four returned prediction arrays
+        y_preds_lower_test, y_preds_upper_test, y_preds_lower_val, y_preds_upper_val = self.train_model(
+            model, optimizer=optimizer, epochs=epochs, batch_size=batch_size, verbose=verbose, learning_rate=learning_rate
+        )
+        
+        # self.plot_training_history(model_param_string)
+        
+        # Pass all four arrays to the plotting function
+        self.plot_prediction_interval(
+            y_preds_lower_test, y_preds_upper_test,
+            y_preds_lower_val, y_preds_upper_val,
+            model_param_string
+        )
+
+        results_val = self.evaluate_model(self.y_val, y_preds_lower_val, y_preds_upper_val)
+        results_test = self.evaluate_model(self.y_test, y_preds_lower_test, y_preds_upper_test)
+
+        results = {
+            "val": results_val,
+            "test": results_test
+        }
+        print(f"{model_param_string}: {json.dumps(results, indent=4)}")
+        # with open(self.results_path / f"{self.satellite}_metrics.json", "w") as f:
+        #     json.dump(results, f, indent=4)
+
+        return results
+
+        
