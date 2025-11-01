@@ -7,6 +7,6 @@ SENTINEL_FILE = 'sentinel-1-processed.csv'
 EOS_FILE = 'eos-04-processed.csv'
 
 X_cols_eos = ['HH-pol', 'HV-pol']
-X_cols_sentinel = ['VV-pol', 'VH-pol']
-y_col = ['label']
-class_labels = ['Low', 'Medium', 'High', 'Very High']
+X_cols_sentinel = ['VH-pol', 'VV-pol']
+
+y_col = ['SM1 (%)']
