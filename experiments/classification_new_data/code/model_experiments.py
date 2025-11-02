@@ -199,10 +199,11 @@ class ClassificationExperiment(Experiment):
 
 
 class RegressionExperiment(Experiment):
-    def __init__(self, X, y, satellite, train_size=0.8, test_size=0.1, val_size=0.1, split_type='train-val-test', print_stats=None):
+    def __init__(self, X, y, satellite, train_size=0.8, test_size=0.1, val_size=0.1, 
+                 split_type='train-val-test', print_stats=None, type='censored'):
         super().__init__(X, y, train_size, test_size, val_size, split_type, print_stats)
         self.satellite = satellite
-        self.results_path = OUTPUT_PATH / "ml_experiment"
+        self.results_path = OUTPUT_PATH / f"ml_experiment_{type}"
 
         self.__scale_data()
 
