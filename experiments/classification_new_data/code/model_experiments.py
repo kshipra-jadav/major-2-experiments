@@ -1,16 +1,23 @@
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OrdinalEncoder, TargetEncoder, MinMaxScaler
 from sklearn.metrics import accuracy_score, classification_report, mean_absolute_error, mean_squared_error, mean_absolute_percentage_error, root_mean_squared_error, r2_score
-from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, RandomForestRegressor, AdaBoostRegressor
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, RandomForestRegressor, AdaBoostRegressor, GradientBoostingRegressor, HistGradientBoostingRegressor
+from sklearn.linear_model import QuantileRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.svm import SVC, SVR
 from sklearn.model_selection import GridSearchCV
 from xgboost import XGBClassifier, XGBRegressor
+from lightgbm import LGBMRegressor
 
 from tensorflow.keras.callbacks import EarlyStopping # type: ignore
 import tensorflow as tf
 
+from mapie.utils import train_conformalize_test_split
+from mapie.regression import ConformalizedQuantileRegressor
+from mapie.metrics.regression import regression_coverage_score, regression_mean_width_score
+
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import json
 import os
@@ -549,4 +556,126 @@ class PredictionIntervalEstimation(Experiment):
 
         return results
 
+
+class ConformalRegression:
+    def __init__(self, X, y, satellite, train_size=0.8, conf_size=0.1, test_size=0.1, print_splits=True, type='uncensored'):
+        self.X = X
+        self.y = y
+        self.satellite = satellite
+        self.train_size = train_size
+        self.conf_size = conf_size
+        self.test_size = test_size
+        self.random_seed = 42
+        self.results_path = OUTPUT_PATH / f"conformal_regression_{type}"
+        self.__prepare_data(print_splits)
+    
+    def __prepare_data(self, print_splits):
+        self.y = self.y.reshape(-1, )
+
+        (
+            X_train, X_cal, X_test,
+            y_train, y_cal, y_test
+        ) = train_conformalize_test_split(self.X, self.y, 
+                                          train_size=self.train_size, conformalize_size=self.conf_size, 
+                                          test_size=self.test_size, random_state=self.random_seed)
+
+        self.X_train = X_train
+        self.X_conf = X_cal
+        self.X_test = X_test
+
+        self.y_train = y_train.reshape(-1, )
+        self.y_conf = y_cal.reshape(-1, )
+        self.y_test = y_test.reshape(-1, )
+
+        if print_splits:
+            total = len(self.X)
+            print(
+                "Split sizes:\n"
+                f"  Train    - X: {getattr(self.X_train, 'shape', (len(self.X_train),))}, y: {len(self.y_train)} ({len(self.y_train)/total:.1%})\n"
+                f"  Conformal- X: {getattr(self.X_conf,  'shape', (len(self.X_conf), ))}, y: {len(self.y_conf)} ({len(self.y_conf)/total:.1%})\n"
+                f"  Test     - X: {getattr(self.X_test,  'shape', (len(self.X_test), ))}, y: {len(self.y_test)} ({len(self.y_test)/total:.1%})\n"
+                f"  Original data rows: {total}"
+            )
+
+    def run_experiment(self):
+        models = {
+            "QuantileRegressor": QuantileRegressor(),
+            "GradientBoostingRegressor": GradientBoostingRegressor(loss="quantile"),
+            "HistGradientBoostingRegressor": HistGradientBoostingRegressor(loss="quantile"),
+            # "LGBMRegressor": LGBMRegressor(objective="quantile")
+        }
+
+        results = {}
+
+        for model_string, model in models.items():
+            print(f"==========Running {model_string}===========\n\n")
+            regressor = ConformalizedQuantileRegressor(
+                estimator=model,
+                confidence_level=0.95,
+                prefit=False
+            )
+            regressor.fit(self.X_train, self.y_train)
+            regressor.conformalize(self.X_conf, self.y_conf)
+
+            _, intervals = regressor.predict_interval(self.X_test, minimize_interval_width=True)
+
+            intervals = intervals.squeeze()
+            lower_preds = intervals[:, 0]
+            upper_preds = intervals[:, 1]
+            self.plot_prediction_interval(lower_preds, upper_preds, model_string)
+            results[model_string] = self.evaluate_model(self.y_test, lower_preds, upper_preds)
         
+        with open(self.results_path / f"{self.satellite}_metrics.json", "w") as f:
+            json.dump(results, f, indent=4)
+    
+    def evaluate_model(self, y_true, y_pred_lower, y_pred_upper):
+        
+        def picp(y_true_vals, y_pred_lower_vals, y_pred_upper_vals):
+            """Prediction Interval Coverage Probability"""
+            covered = np.sum((y_true_vals >= y_pred_lower_vals) & (y_true_vals <= y_pred_upper_vals))
+            return covered / len(y_true_vals)
+
+        def mpiw(y_pred_lower_vals, y_pred_upper_vals):
+            """Mean Prediction Interval Width"""
+            return np.mean(y_pred_upper_vals - y_pred_lower_vals)
+
+        return {
+            'PICP': float(picp(y_true, y_pred_lower, y_pred_upper)),
+            'MPIW': float(mpiw(y_pred_lower, y_pred_upper))
+        }
+
+    def plot_prediction_interval(self, y_pred_lower_test, y_pred_upper_test, model_param_string):
+        indices = range(len(self.y_test))
+
+        # Calculate metrics for both test and validation sets
+        test_eval_dict = self.evaluate_model(self.y_test, y_pred_lower_test, y_pred_upper_test)
+
+        plt.figure(figsize=(14, 7))
+        plt.plot(indices, self.y_test, 'o', color='blue', label='Actual Soil Moisture (Test Set)')
+        plt.plot(indices, y_pred_lower_test, color='red', linestyle='--', label='Lower Bound')
+        plt.plot(indices, y_pred_upper_test, color='orange', linestyle='--', label='Upper Bound')
+
+        plt.fill_between(indices, y_pred_lower_test, y_pred_upper_test, color='gray', alpha=0.2, label='95% Prediction Interval')
+
+        # Create a clean, aligned text box for both metrics
+        test_metrics = f"Test  | PICP: {test_eval_dict['PICP']*100:5.2f}% | MPIW: {test_eval_dict['MPIW']:.4f}"
+        metrics_text = f"{test_metrics}"
+        
+        plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8), 
+                    verticalalignment='top', fontsize=12,
+                    # Using a monospaced font for clean alignment
+                    fontname='monospace')
+        
+        plot_dir = self.results_path / "plots"
+        if not os.path.exists(plot_dir):
+            os.makedirs(plot_dir)
+
+        plt.xlabel('Sample Index')
+        plt.ylabel('Soil Moisture')
+        plt.title(f'{self.satellite}: {model_param_string}\nPrediction Interval for Soil Moisture')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f"{plot_dir}/{self.satellite}_{model_param_string}.png", dpi=300)
+        # plt.show()
+        plt.close()
