@@ -130,11 +130,11 @@ class Experiment:
 
 class ClassificationExperiment(Experiment):
     def __init__(self, X, y, satellite_name, labels, train_size=0.8, test_size=0.1, val_size=0.1, 
-                 split_type='train-val-test', print_stats=True):
+                 split_type='train-val-test', print_stats=True, type='censored'):
         super().__init__(X, y, train_size, test_size, val_size, split_type, print_stats)
         self.satellite_name = satellite_name
         self.results = {}
-        self.results_path = OUTPUT_PATH / "classification"
+        self.results_path = OUTPUT_PATH / f"classification_{type}"
         self.labels = labels
 
         self.__scale_data()
