@@ -354,7 +354,7 @@ class RegressionExperiment(Experiment):
 class PredictionIntervalEstimation(Experiment):
     def __init__(self, X, y, satellite, train_size=0.8, test_size=0.1, val_size=0.1, split_type='train-val-test', print_stats=None):
         super().__init__(X, y, train_size, test_size, val_size, split_type, print_stats)
-        self.results_path = OUTPUT_PATH / "pi_estimation"
+        self.results_path = OUTPUT_PATH / "pi_estimation_censored"
         self.satellite = satellite
 
         self.__scale_data()
