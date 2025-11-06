@@ -359,6 +359,139 @@ class RegressionExperiment(Experiment):
         return results
 
 
+class ANNExperiment(Experiment):
+    def __init__(self, X, y, satellite, train_size=0.8, test_size=0.1, val_size=0.1, 
+                 split_type='train-val-test', print_stats=None, type='censored'):
+        super().__init__(X, y, train_size, test_size, val_size, split_type, print_stats)
+        self.satellite = satellite
+        self.results_path = OUTPUT_PATH / f"ann_experiments_{type}"
+
+        self.__scale_data()
+    
+    def __scale_data(self):
+        self.x_scaler = MinMaxScaler()
+        self.y_scaler = MinMaxScaler()
+
+        self.X_train_scaled = self.x_scaler.fit_transform(self.X_train)
+        self.X_test_scaled = self.x_scaler.transform(self.X_test)
+        self.X_val_scaled = self.x_scaler.transform(self.X_val)
+
+        self.y_train_scaled = self.y_scaler.fit_transform(self.y_train)
+        self.y_test_scaled = self.y_scaler.transform(self.y_test)
+        self.y_val_scaled = self.y_scaler.transform(self.y_val)
+
+        self.y_train = self.y_train.reshape(-1, )
+        self.y_train_scaled = self.y_train_scaled.reshape(-1, )
+        self.y_test = self.y_test.reshape(-1, )
+        self.y_test_scaled = self.y_test_scaled.reshape(-1, )
+        self.y_val = self.y_val.reshape(-1, )
+        self.y_val_scaled = self.y_val_scaled.reshape(-1, )
+
+    def train_model(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0):
+        self.model = model
+        
+        # Compile the model
+        self.model.compile(
+            optimizer=optimizer,
+            loss='mse',
+            metrics=['mae']
+        )
+        
+        # Train the model
+        self.history = self.model.fit(
+            self.X_train_scaled, self.y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(self.X_val_scaled, self.y_val),
+            verbose=verbose
+        )
+        
+        # Evaluate on test set
+        test_loss, test_mae = self.model.evaluate(self.X_test_scaled, self.y_test, verbose=0)
+        print(f"\nTest Loss (MSE): {test_loss:.4f}")
+        print(f"Test MAE: {test_mae:.4f}")
+        
+        # Make predictions
+        y_pred = self.model.predict(self.X_test_scaled).flatten()
+        y_pred_val = self.model.predict(self.X_val_scaled).flatten()
+
+        # Calculate additional metrics
+        results_test = self.evaluate_model(self.y_test, y_pred)
+        results_val = self.evaluate_model(self.y_val, y_pred_val)
+
+        print(f"\nAdditional Metrics:")
+        print(f"MSE: {results_test['MSE']:.4f}")
+        print(f"R² Score: {results_test['R2']:.4f}")
+        
+        return y_pred, results_test, results_val
+        
+
+    def evaluate_model(self, y_true, y_pred):
+        mse = mean_squared_error(y_true, y_pred)
+        r2 = r2_score(y_true, y_pred)
+        mae = mean_absolute_error(y_true, y_pred)
+
+        return {
+            "MAE": float(mae),
+            "MSE": float(mse),
+            "R2": float(r2)
+        }
+    
+    def plot_line_comparison(self, test_results, val_results, test_preds, model_params):
+        test_mae = test_results['MAE']
+        val_mae = val_results['MAE']
+        test_mse = test_results['MSE']
+        val_mse = val_results['MSE']
+        
+        # --- Plotting ---
+        plt.figure(figsize=(14, 7))
+        
+        # Create index for x-axis (based on the test set)
+        indices = range(len(self.y_test))
+        
+        # Plot both lines (showing test set comparison)
+        plt.scatter(indices, self.y_test, label='Actual (Test)', color='blue', alpha=0.7)
+        plt.scatter(indices, test_preds, label='Predicted (Test)', color='red', alpha=0.7)
+        
+        plt.xlabel('Sample Index')
+        plt.ylabel('Values')
+        plt.title(f'{self.satellite}: Actual vs Predicted Values (Test Set).\n Params: {model_params}')
+
+        # Updated metrics text to show both Test and Val
+        metrics_text = (f'Test MAE: {test_mae:.4f}  |  Val MAE:  {val_mae:.4f}\n'
+                        f'Test MSE: {test_mse:.2f}  |  Val MSE: {val_mse:.2f}')
+        
+        plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
+                     bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8), 
+                     verticalalignment='top', fontsize=12)
+        
+        plot_path = self.results_path / "plots"
+        os.makedirs(plot_path, exist_ok=True)
+
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(plot_path / f"{self.satellite}_{model_params}.png", dpi=300, bbox_inches='tight')
+        # plt.show()
+        plt.close()
+    
+    def run_experiment(self, model, optimizer='adam', epochs=200, batch_size=32, verbose=0, model_param_string=None):
+        # Train model
+        y_pred, test_results, val_results = self.train_model(
+            model, optimizer, epochs, batch_size, verbose
+        )
+        
+        # Generate plots
+        self.plot_line_comparison(test_results, val_results, y_pred, model_param_string)
+
+        results = {
+            "Test": test_results,
+            "Val": val_results
+        }
+
+        return results
+
+
+
 class PredictionIntervalEstimation(Experiment):
     def __init__(self, X, y, satellite, train_size=0.8, test_size=0.1, val_size=0.1, split_type='train-val-test', print_stats=None):
         super().__init__(X, y, train_size, test_size, val_size, split_type, print_stats)
