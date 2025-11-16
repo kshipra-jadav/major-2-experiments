@@ -282,9 +282,9 @@ class RegressionExperiment(Experiment):
         plt.scatter(indices, y_test, label='Actual', alpha=0.7, color='blue')
         plt.scatter(indices, y_preds, label='Predicted', alpha=0.7, color='red')
         
-        plt.xlabel('Sample Index')
-        plt.ylabel('Values')
-        plt.title(f'{self.satellite}: Actual vs Predicted Values - {model_name}')
+        plt.xlabel('Sample Index', fontsize=16)
+        plt.ylabel('Values', fontsize=16)
+        plt.title(f'{self.satellite}: Actual vs Predicted Values - {model_name}', fontsize=16)
         plt.legend()
         plt.grid(True, alpha=0.3)
         
@@ -292,7 +292,7 @@ class RegressionExperiment(Experiment):
         metrics_text = f'MAE: {mae:.4f}\nMAPE: {mape:.2f}%'
         plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction',
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
-                    verticalalignment='top', fontsize=12)
+                    verticalalignment='top', fontsize=16)
         
         # Save plot
         plot_path = os.path.join(plot_dir, f"{self.satellite}_{model_name}_actual_vs_predicted.png")
@@ -453,9 +453,9 @@ class ANNExperiment(Experiment):
         plt.scatter(indices, self.y_test, label='Actual (Test)', color='blue', alpha=0.7)
         plt.scatter(indices, test_preds, label='Predicted (Test)', color='red', alpha=0.7)
         
-        plt.xlabel('Sample Index')
-        plt.ylabel('Values')
-        plt.title(f'{self.satellite}: Actual vs Predicted Values (Test Set).\n Params: {model_params}')
+        plt.xlabel('Sample Index', fontsize=16)
+        plt.ylabel('Values', fontsize=16)
+        plt.title(f'{self.satellite}: Actual vs Predicted Values (Test Set).\n Params: {model_params}', fontsize=16)
 
         # Updated metrics text to show both Test and Val
         metrics_text = (f'Test MAE: {test_mae:.4f}  |  Val MAE:  {val_mae:.4f}\n'
@@ -463,7 +463,7 @@ class ANNExperiment(Experiment):
         
         plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
                      bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8), 
-                     verticalalignment='top', fontsize=12)
+                     verticalalignment='top', fontsize=16)
         
         plot_path = self.results_path / "plots"
         os.makedirs(plot_path, exist_ok=True)
@@ -645,7 +645,7 @@ class PredictionIntervalEstimation(Experiment):
         
         plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
                     bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8), 
-                    verticalalignment='top', fontsize=12,
+                    verticalalignment='top', fontsize=16,
                     # Using a monospaced font for clean alignment
                     fontname='monospace')
         
@@ -653,10 +653,10 @@ class PredictionIntervalEstimation(Experiment):
         if not os.path.exists(plot_dir):
             os.makedirs(plot_dir)
 
-        plt.xlabel('Sample Index')
-        plt.ylabel('Soil Moisture')
-        plt.title(f'{self.satellite}: {model_param_string}\nPrediction Interval for Soil Moisture')
-        plt.legend()
+        plt.xlabel('Sample Index', fontsize=16)
+        plt.ylabel('Soil Moisture', fontsize=16)
+        plt.title(f'{self.satellite}: {model_param_string}\nPrediction Interval for Soil Moisture', fontsize=16)
+        plt.legend(fontsize=14)
         plt.grid(True, alpha=0.3)
         plt.savefig(f"{plot_dir}/{self.satellite}_{model_param_string}.png", dpi=300)
         # plt.show()
@@ -797,7 +797,7 @@ class ConformalRegression:
         
         plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
                     bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8), 
-                    verticalalignment='top', fontsize=12,
+                    verticalalignment='top', fontsize=16,
                     # Using a monospaced font for clean alignment
                     fontname='monospace')
         
@@ -805,10 +805,10 @@ class ConformalRegression:
         if not os.path.exists(plot_dir):
             os.makedirs(plot_dir)
 
-        plt.xlabel('Sample Index')
-        plt.ylabel('Soil Moisture')
-        plt.title(f'{self.satellite}: {model_param_string}\nPrediction Interval for Soil Moisture')
-        plt.legend()
+        plt.xlabel('Sample Index', fontsize=16)
+        plt.ylabel('Soil Moisture', fontsize=16)
+        plt.title(f'{self.satellite}: {model_param_string}\nPrediction Interval for Soil Moisture', fontsize=16)
+        plt.legend(fontsize=14)
         plt.grid(True, alpha=0.3)
         plt.savefig(f"{plot_dir}/{self.satellite}_{model_param_string}.png", dpi=300)
         # plt.show()
