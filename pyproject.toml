@@ -22,4 +22,5 @@ dependencies = [
     "tensorflow-cpu>=2.20.0",
     "tqdm>=4.67.1",
     "xgboost-cpu==3.0.0",
+    "yellowbrick>=1.5",
 ]

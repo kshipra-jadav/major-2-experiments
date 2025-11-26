@@ -8,6 +8,8 @@ from sklearn.svm import SVC, SVR
 from sklearn.model_selection import GridSearchCV
 from xgboost import XGBClassifier, XGBRegressor
 from lightgbm import LGBMRegressor
+from yellowbrick.regressor import prediction_error
+
 
 from tensorflow.keras.callbacks import EarlyStopping # type: ignore
 import tensorflow as tf
@@ -254,7 +256,10 @@ class RegressionExperiment(Experiment):
         
         y_preds = best_model.predict(X_test_data)
 
-        self.make_plot(y_test, y_preds, model_name)
+        # self.make_plot(y_test, y_preds, model_name)
+        # self.plot_prediction_line(y_test, y_preds, model_name)
+        visualizer = prediction_error(best_model, X_train_data, y_train, X_test_data, y_test)
+        visualizer.show()
         return self.make_result_dict(y_test, y_preds)
     
     def make_result_dict(self, y_true, y_preds):
@@ -296,7 +301,7 @@ class RegressionExperiment(Experiment):
         
         # Save plot
         plot_path = os.path.join(plot_dir, f"{self.satellite}_{model_name}_actual_vs_predicted.png")
-        plt.savefig(plot_path, bbox_inches='tight', dpi=300)
+        # plt.savefig(plot_path, bbox_inches='tight', dpi=300)
         plt.close()
 
     def run_experiment(self):
@@ -358,6 +363,7 @@ class RegressionExperiment(Experiment):
         
         return results
 
+    
 
 class ANNExperiment(Experiment):
     def __init__(self, X, y, satellite, train_size=0.8, test_size=0.1, val_size=0.1, 
@@ -481,7 +487,8 @@ class ANNExperiment(Experiment):
         )
         
         # Generate plots
-        self.plot_line_comparison(test_results, val_results, y_pred, model_param_string)
+        # self.plot_line_comparison(test_results, val_results, y_pred, model_param_string)
+        self.plot_prediction_line(self.y_test, y_pred, model_param_string)
 
         results = {
             "Test": test_results,
@@ -489,6 +496,65 @@ class ANNExperiment(Experiment):
         }
 
         return results
+
+    def plot_prediction_line(self, y_test, y_preds, model_name):
+        plot_dir = self.results_path / "plots"
+        os.makedirs(plot_dir, exist_ok=True)
+
+        mae = mean_absolute_error(y_test, y_preds)
+        mape = mean_absolute_percentage_error(y_test, y_preds) * 100
+        r2 = r2_score(y_test, y_preds)
+
+        # Use a square figure to make the identity line 45 degrees visually
+        plt.figure(figsize=(10, 10))
+        
+        # 1. Scatter Plot (Actual vs Predicted)
+        plt.scatter(y_test, y_preds, alpha=0.6, edgecolors='k', linewidth=0.5, color='steelblue', label='Prediction')
+        
+        # Determine axis limits to keep plot square and unified
+        data_min = min(y_test.min(), y_preds.min())
+        data_max = max(y_test.max(), y_preds.max())
+        
+        # Add a small buffer (5%) so points aren't on the edge
+        buffer = (data_max - data_min) * 0.05
+        p_min = data_min - buffer
+        p_max = data_max + buffer
+
+        # 2. Identity Line (y = x) -> Perfect Prediction
+        plt.plot([p_min, p_max], [p_min, p_max], color='black', linestyle='--', lw=2, label='Identity')
+
+        # 3. Best Fit Line (Linear Regression of the predictions)
+        # This helps you see if the model is systematically over/under predicting
+        try:
+            coeffs = np.polyfit(y_test.flatten(), y_preds.flatten(), 1)
+            poly_eqn = np.poly1d(coeffs)
+            x_range = np.linspace(p_min, p_max, 100)
+            plt.plot(x_range, poly_eqn(x_range), color='darkred', linestyle='-', lw=2, label='Best Fit')
+        except Exception as e:
+            print(f"Could not fit regression line for plot: {e}")
+        
+        plt.xlabel('Actual Values', fontsize=14)
+        plt.ylabel('Predicted Values', fontsize=14)
+        plt.title(f'{self.satellite}: Prediction Error - {model_name}', fontsize=16)
+        
+        # Metrics Text Box
+        metrics_text = f'MAE: {mae:.4f}\nMAPE: {mape:.2f}%\nR²: {r2:.4f}'
+        plt.annotate(metrics_text, xy=(0.05, 0.95), xycoords='axes fraction',
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8),
+                    verticalalignment='top', fontsize=14)
+        
+        # Enforce square axes
+        plt.xlim(p_min, p_max)
+        plt.ylim(p_min, p_max)
+        plt.gca().set_aspect('equal', adjustable='box')
+        
+        plt.legend(fontsize=12)
+        plt.grid(True, alpha=0.3)
+        
+        # Save plot
+        plot_path = os.path.join(plot_dir, f"{self.satellite}_{model_name}_prediction_error.png")
+        # plt.savefig(plot_path, bbox_inches='tight', dpi=300)
+        plt.show()
 
 
 
@@ -812,4 +878,179 @@ class ConformalRegression:
         plt.grid(True, alpha=0.3)
         plt.savefig(f"{plot_dir}/{self.satellite}_{model_param_string}.png", dpi=300)
         # plt.show()
+        plt.close()
+
+
+
+class ConformalizedQuantileExperiment(PredictionIntervalEstimation):
+    def __init__(self, X, y, satellite, train_size=0.8, test_size=0.1, val_size=0.1, split_type='train-val-test', print_stats=None):
+        # Reuse parent init for data splitting (Train=Fit, Val=Calibration, Test=Evaluate) and scaling
+        super().__init__(X, y, satellite, train_size, test_size, val_size, split_type, print_stats)
+        self.results_path = OUTPUT_PATH / "conformal_results"
+        os.makedirs(self.results_path, exist_ok=True)
+
+    def __apply_cqr_calibration(self, y_true_cal, y_lower_cal, y_upper_cal, y_lower_test, y_upper_test, alpha=0.05):
+        """
+        Applies CQR calibration.
+        Computes score E_i = max(q_low - y, y - q_high) on calibration set.
+        Adjusts test intervals by the (1-alpha) quantile of scores.
+        """
+        # 1. Calculate non-conformity scores on calibration set
+        # We want y to be between q_low and q_high.
+        # If y < q_low, error is positive (q_low - y)
+        # If y > q_high, error is positive (y - q_high)
+        # If inside, error is negative (max of two negatives)
+        scores = np.maximum(y_lower_cal - y_true_cal, y_true_cal - y_upper_cal)
+        
+        # 2. Compute Q (1-alpha quantile)
+        # mapie logic usually uses (1-alpha)*(1 + 1/n) for finite sample correction, 
+        # but standard np.quantile is acceptable for large n.
+        q_hat = np.quantile(scores, 1 - alpha, method='higher')
+        
+        print(f"  > CQR Calibration constant (Q): {q_hat:.4f}")
+        
+        # 3. Adjust Test predictions
+        y_lower_test_cqr = y_lower_test - q_hat
+        y_upper_test_cqr = y_upper_test + q_hat
+        
+        return y_lower_test_cqr, y_upper_test_cqr
+
+    def __apply_split_conformal_calibration(self, y_true_cal, y_pred_cal, y_pred_test, alpha=0.05):
+        """
+        Applies standard Split Conformal Prediction (Absolute Residuals).
+        Used for models that predict mean (SVM) instead of quantiles.
+        """
+        # 1. Calculate absolute residuals on calibration set
+        scores = np.abs(y_true_cal - y_pred_cal)
+        
+        # 2. Compute Q
+        q_hat = np.quantile(scores, 1 - alpha, method='higher')
+        
+        print(f"  > Split Conformal Calibration constant (Q): {q_hat:.4f}")
+        
+        # 3. Create intervals for Test
+        y_lower_test = y_pred_test - q_hat
+        y_upper_test = y_pred_test + q_hat
+        
+        return y_lower_test, y_upper_test
+
+    def run_linear_cqr(self, alpha=0.05):
+        print("\n--- Running Linear CQR (QuantileRegressor) ---")
+        # Train Lower Quantile Model
+        qr_low = QuantileRegressor(quantile=alpha/2, solver='highs')
+        qr_low.fit(self.X_train_scaled, self.y_train)
+        
+        # Train Upper Quantile Model
+        qr_high = QuantileRegressor(quantile=1 - alpha/2, solver='highs')
+        qr_high.fit(self.X_train_scaled, self.y_train)
+        
+        # Predict on Calibration (Val)
+        low_cal = qr_low.predict(self.X_val_scaled)
+        high_cal = qr_high.predict(self.X_val_scaled)
+        
+        # Predict on Test
+        low_test = qr_low.predict(self.X_test_scaled)
+        high_test = qr_high.predict(self.X_test_scaled)
+        
+        # Apply CQR
+        return self.__apply_cqr_calibration(
+            self.y_val, low_cal, high_cal, low_test, high_test, alpha
+        )
+
+    def run_svm_conformal(self, alpha=0.05):
+        print("\n--- Running SVM Split Conformal (SVR) ---")
+        # SVM doesn't support Quantile loss natively efficiently.
+        # We use standard Split Conformal: Predict Mean -> Calibrate Residuals.
+        
+        # 1. Train SVR (Mean predictor)
+        # Note: SVR can be slow on unscaled Y. 
+        # If y is large, consider scaling Y, but for consistency we use y_train (unscaled) here
+        # assuming the user handles runtime or data isn't huge.
+        svr = SVR(kernel='rbf') 
+        svr.fit(self.X_train_scaled, self.y_train)
+        
+        # 2. Predict
+        pred_cal = svr.predict(self.X_val_scaled)
+        pred_test = svr.predict(self.X_test_scaled)
+        
+        # 3. Apply Split Conformal
+        return self.__apply_split_conformal_calibration(
+            self.y_val, pred_cal, pred_test, alpha
+        )
+
+    def run_ann_cqr(self, model_template, epochs=100, alpha=0.05):
+        print("\n--- Running ANN CQR ---")
+        # 1. Train Quantile ANN (using parent class logic)
+        # Returns raw quantile predictions (uncalibrated)
+        low_test, high_test, low_cal, high_cal = self.train_model(
+            model_template, 
+            optimizer='adam', 
+            epochs=epochs, 
+            batch_size=32, 
+            verbose=0,
+            learning_rate=0.001
+        )
+        
+        # 2. Apply CQR
+        return self.__apply_cqr_calibration(
+            self.y_val, low_cal, high_cal, low_test, high_test, alpha
+        )
+
+    def run_experiment(self, ann_model_template, epochs=100, alpha=0.05):
+        results = {}
+        
+        # 1. Run Models
+        svm_low, svm_high = self.run_svm_conformal(alpha)
+        lin_low, lin_high = self.run_linear_cqr(alpha)
+        ann_low, ann_high = self.run_ann_cqr(ann_model_template, epochs, alpha)
+        
+        experiments = {
+            "SVM_Split_Conformal": (svm_low, svm_high),
+            "Linear_CQR": (lin_low, lin_high),
+            "ANN_CQR": (ann_low, ann_high)
+        }
+        
+        # 2. Evaluate and Plot
+        for name, (y_low, y_high) in experiments.items():
+            print(f"Evaluating {name}...")
+            
+            # Metrics
+            metrics = self.evaluate_model(self.y_test, y_low, y_high)
+            results[name] = metrics
+            
+            # Plot
+            self.plot_prediction_interval(y_low, y_high, [], [], name) # Passing empty Val lists as we focus on Test result
+            
+        # 3. Save Results
+        metrics_path = self.results_path / f"{self.satellite}_conformal_metrics.json"
+        with open(metrics_path, "w") as f:
+            json.dump(results, f, indent=4)
+            
+        print(f"\nAll Conformal Experiments Completed. Results saved to {metrics_path}")
+        return results
+    
+    # Override plot to be simpler since we iterate models
+    def plot_prediction_interval(self, y_pred_lower_test, y_pred_upper_test, _, __, model_name):
+        indices = range(len(self.y_test))
+        metrics = self.evaluate_model(self.y_test, y_pred_lower_test, y_pred_upper_test)
+        
+        plt.figure(figsize=(14, 7))
+        plt.plot(indices, self.y_test, 'o', color='blue', label='Actual', markersize=4, alpha=0.6)
+        plt.plot(indices, y_pred_lower_test, color='red', linestyle='--', label='Lower Bound', linewidth=1)
+        plt.plot(indices, y_pred_upper_test, color='orange', linestyle='--', label='Upper Bound', linewidth=1)
+        plt.fill_between(indices, y_pred_lower_test, y_pred_upper_test, color='gray', alpha=0.2, label='95% Confidence')
+
+        metrics_text = f"{model_name}\nPICP: {metrics['PICP']*100:.2f}%\nMPIW: {metrics['MPIW']:.4f}"
+        plt.annotate(metrics_text, xy=(0.02, 0.98), xycoords='axes fraction', 
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8), 
+                    verticalalignment='top', fontsize=14, fontname='monospace')
+        
+        plt.xlabel('Sample Index')
+        plt.ylabel('Value')
+        plt.title(f'{self.satellite} - {model_name} Prediction Intervals')
+        plt.legend(loc='upper right')
+        plt.grid(True, alpha=0.3)
+        
+        plot_path = self.results_path / f"{self.satellite}_{model_name}_plot.png"
+        plt.savefig(plot_path, bbox_inches='tight', dpi=300)
         plt.close()
