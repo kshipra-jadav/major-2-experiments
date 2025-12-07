@@ -589,13 +589,13 @@ class PredictionIntervalEstimation(Experiment):
         error = y_true - y_pred
         return tf.reduce_mean(tf.maximum(tau * error, (tau - 1) * error))
 
-    def lower_quantile_loss(self, y_true, y_pred):
-        return self.pinball_loss(y_true, y_pred, tau=0.025)
+    def lower_quantile_loss(self, y_true, y_pred, tau=0.025):
+        return self.pinball_loss(y_true, y_pred, tau=tau)
     
-    def upper_quantile_loss(self, y_true, y_pred):
-        return self.pinball_loss(y_true, y_pred, tau=0.975)
+    def upper_quantile_loss(self, y_true, y_pred, tau=0.975):
+        return self.pinball_loss(y_true, y_pred, tau=tau)
 
-    def train_model(self, model, learning_rate, optimizer='adam', epochs=200, batch_size=32, verbose=0):
+    def train_model(self, model, learning_rate, optimizer='adam', epochs=200, batch_size=32, verbose=0, tau_lower=0.025, tau_upper=0.975):
         self.upper_model = tf.keras.models.clone_model(model)
         self.lower_model = tf.keras.models.clone_model(model)
 
@@ -609,14 +609,18 @@ class PredictionIntervalEstimation(Experiment):
         # 2. Create two new, independent optimizer instances from that config
         upper_optimizer = tf.keras.optimizers.get(optimizer_config.copy())
         lower_optimizer = tf.keras.optimizers.get(optimizer_config.copy())
+
+        loss_lower = lambda y, p: self.lower_quantile_loss(y, p, tau=tau_lower)
+        loss_upper = lambda y, p: self.upper_quantile_loss(y, p, tau=tau_upper)
+
         # compile both models
         self.lower_model.compile(
             optimizer=lower_optimizer,
-            loss=self.lower_quantile_loss
+            loss=loss_lower
         )
         self.upper_model.compile(
             optimizer=upper_optimizer,
-            loss=self.upper_quantile_loss
+            loss=loss_upper
         )
 
 
@@ -1054,3 +1058,107 @@ class ConformalizedQuantileExperiment(PredictionIntervalEstimation):
         plot_path = self.results_path / f"{self.satellite}_{model_name}_plot.png"
         plt.savefig(plot_path, bbox_inches='tight', dpi=300)
         plt.close()
+    
+
+    def plot_tuning_comparison(self, results_df):
+        """
+        Generates an academic-style dual-axis plot comparing Raw vs CQR
+        across different Tau configurations.
+        """
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        
+        x = np.arange(len(results_df))
+        width = 0.35
+        
+        # --- Plot 1: PICP (Coverage) ---
+        ax1.bar(x - width/2, results_df['Raw_PICP'] * 100, width, label='Raw QR', color='#4c72b0', alpha=0.8, edgecolor='black')
+        ax1.bar(x + width/2, results_df['CQR_PICP'] * 100, width, label='CQR', color='#dd8452', alpha=0.8, edgecolor='black')
+        
+        # Target Line (95%)
+        ax1.axhline(y=95, color='red', linestyle='--', linewidth=2, label='Target (95%)')
+        
+        ax1.set_ylabel('Coverage Probability (PICP) [%]', fontsize=14)
+        ax1.set_title('Coverage Consistency', fontsize=16)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(results_df['Tau_Pair'], rotation=90, ha='right', fontsize=12)
+        ax1.set_ylim(80, 100)  # Zoom in on high coverage area usually
+        ax1.legend(loc='lower right', fontsize=12)
+        ax1.grid(axis='y', linestyle='--', alpha=0.4)
+
+        # --- Plot 2: MPIW (Width) ---
+        ax2.bar(x - width/2, results_df['Raw_MPIW'], width, label='Raw QR', color='#4c72b0', alpha=0.8, edgecolor='black')
+        ax2.bar(x + width/2, results_df['CQR_MPIW'], width, label='CQR', color='#dd8452', alpha=0.8, edgecolor='black')
+        
+        ax2.set_ylabel('Mean Prediction Interval Width (MPIW)', fontsize=14)
+        ax2.set_title('Interval Efficiency (Lower is Better)', fontsize=16)
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(results_df['Tau_Pair'], rotation=90, ha='right', fontsize=12)
+        ax2.legend(loc='upper right', fontsize=12)
+        ax2.grid(axis='y', linestyle='--', alpha=0.4)
+
+        plt.suptitle(f"{self.satellite}: Hyperparameter Tuning (Lower/Upper Loss)", fontsize=18)
+        plt.tight_layout()
+        
+        plot_path = self.results_path / f"{self.satellite}_tau_tuning_comparison.png"
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def run_ann_tuning_experiment(self, model_template, lower_taus=[0.01, 0.015, 0.02, 0.025, 0.03, 0.04], epochs=100):
+        """
+        Runs ANN QR and CQR for various (tau_lower, tau_upper) pairs 
+        where the difference is fixed at 0.95.
+        """
+        tuning_results = []
+        alpha = 0.05 # Fixed target alpha
+
+        print(f"\n=== Starting Tau Hyperparameter Tuning for {self.satellite} ===")
+        
+        for lo in lower_taus:
+            hi = round(lo + 0.95, 3) # Maintain 0.95 gap
+            pair_name = f"Low:{lo} - High:{hi}"
+            print(f"\nRunning configuration: {pair_name}")
+
+            # 1. Train Base Models
+            # We use the updated train_model which accepts tau arguments
+            pred_lo_test, pred_hi_test, pred_lo_val, pred_hi_val = self.train_model(
+                model_template, 
+                optimizer='adam', 
+                epochs=epochs, 
+                learning_rate=0.001,
+                verbose=0,
+                tau_lower=lo,
+                tau_upper=hi
+            )
+
+            # 2. Evaluate Raw QR
+            raw_metrics = self.evaluate_model(self.y_test, pred_lo_test, pred_hi_test)
+
+            # 3. Apply CQR Calibration
+            # We use the Validation set predictions to calibrate
+            cqr_lo_test, cqr_hi_test = self._ConformalizedQuantileExperiment__apply_cqr_calibration(
+                self.y_val, pred_lo_val, pred_hi_val, pred_lo_test, pred_hi_test, alpha=alpha
+            )
+
+            # 4. Evaluate CQR
+            cqr_metrics = self.evaluate_model(self.y_test, cqr_lo_test, cqr_hi_test)
+
+            tuning_results.append({
+                "Tau_Pair": pair_name,
+                "Raw_PICP": raw_metrics['PICP'],
+                "Raw_MPIW": raw_metrics['MPIW'],
+                "CQR_PICP": cqr_metrics['PICP'],
+                "CQR_MPIW": cqr_metrics['MPIW']
+            })
+
+        # Convert to DF for easier plotting
+        df_results = pd.DataFrame(tuning_results)
+        
+        # Save JSON
+        json_path = self.results_path / f"{self.satellite}_tau_tuning_metrics.json"
+        df_results.to_json(json_path, orient='records', indent=4)
+        print(f"Tuning metrics saved to {json_path}")
+
+        # Plot
+        self.plot_tuning_comparison(df_results)
+
+        return df_results
